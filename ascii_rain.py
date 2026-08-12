@@ -19,6 +19,7 @@ Design constraints worth knowing before editing:
 
 import argparse
 import curses
+import locale
 import random
 import signal
 import sys
@@ -214,7 +215,13 @@ class Drop:
                 self.cells[row] = random.choice(self.glyphs)
         if self.cells and random.random() < self.churn:
             row = random.choice(list(self.cells))
-            self.cells[row] = random.choice(self.glyphs)
+            # Re-pick if the draw matched what is already there: with a
+            # two-glyph pool like `binary`, half of every column's shimmer was
+            # a glyph being replaced by itself.
+            glyph = random.choice(self.glyphs)
+            if len(self.glyphs) > 1 and glyph == self.cells[row]:
+                glyph = random.choice(self.glyphs.replace(glyph, ""))
+            self.cells[row] = glyph
         # Cells that have fallen out of the trail are dead; drop them so the
         # dict cannot grow without bound on a long-running screensaver.
         cutoff = int(self.head) - self.length
@@ -311,6 +318,13 @@ def run(stdscr, glyphs, speed, color):
         curses.set_escdelay(25)
     except (AttributeError, curses.error):
         pass
+    try:
+        # cbreak leaves tty flow control on, so Ctrl-S froze the program and
+        # Ctrl-Q was swallowed — two keys that did not exit, from a program
+        # that promises any key does. raw() hands every byte straight through.
+        curses.raw()
+    except curses.error:
+        pass
     stdscr.nodelay(True)
     has_color = init_colors(color)
     head_fg, body_fg, _ = COLORS[color]
@@ -358,32 +372,100 @@ def run(stdscr, glyphs, speed, color):
             next_frame = time.monotonic()
 
 
+CATCHABLE = ("SIGINT", "SIGQUIT", "SIGHUP", "SIGTERM")
+
+
 def install_signal_handlers():
     """Turn fatal signals into an exception so the terminal is restored.
 
     Ctrl-\\ (SIGQUIT) killed the process outright, leaving the user on the
     alternate screen with echo off, needing `reset` to get their shell back.
     SIGHUP did the same. SIGKILL cannot be caught and never will be.
+
+    The first signal disarms all the others. Two arriving in the same
+    interpreter tick — `^C^\\` pasted as one write, or a supervisor sending
+    SIGINT then SIGTERM — used to raise the second exception *inside* the
+    restore the first one had started, which left the terminal exactly as
+    broken as no handler at all, and then exited 0 about it.
     """
 
-    def handler(signum, frame):
-        raise Interrupted(signum)
+    handled = []
 
-    for name in ("SIGQUIT", "SIGHUP", "SIGTERM"):
-        sig = getattr(signal, name, None)
-        if sig is not None:
+    def handler(signum, frame):
+        for sig in handled:
             try:
-                signal.signal(sig, handler)
+                signal.signal(sig, signal.SIG_IGN)
             except (ValueError, OSError):
                 pass
+        raise Interrupted(signum)
+
+    for name in CATCHABLE:
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            continue
+        handled.append(sig)
+
+
+def terminal_encoding():
+    """The encoding curses will actually put on the wire."""
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass
+    try:
+        return locale.nl_langinfo(locale.CODESET) or "ascii"
+    except (AttributeError, ValueError):
+        return getattr(sys.stdout, "encoding", None) or "ascii"
+
+
+def representable(glyphs, encoding, parser, charset_name):
+    """Drop glyphs the terminal cannot encode, and say so out loud.
+
+    Under a non-UTF-8 locale — `LC_ALL=C`, which is what cron, some CI runners
+    and `sudo` hand you — curses silently emits a space for every glyph it
+    cannot encode. `blocks` drew a wholly blank screen and `matrix` quietly
+    became a field of digits, both with no message and exit 0.
+    """
+    keep = ""
+    for ch in glyphs:
+        try:
+            ch.encode(encoding)
+        except (UnicodeEncodeError, LookupError):
+            continue
+        keep += ch
+    if not keep:
+        parser.error(
+            "this terminal's encoding (%s) cannot render the %s glyphs — try "
+            "--charset ascii or --charset binary, or a UTF-8 locale"
+            % (encoding, charset_name)
+        )
+    if len(keep) < len(glyphs):
+        sys.stderr.write(
+            "%s: %d of %d %s glyphs are not representable in %s; drawing with "
+            "the rest.\n" % (PROG, len(glyphs) - len(keep), len(glyphs),
+                             charset_name, encoding)
+        )
+    return keep
 
 
 def main(argv=None):
+    # Before anything else: a signal during argument parsing should not be able
+    # to outrun the handler that makes it exit cleanly.
+    install_signal_handlers()
+
     parser = build_parser()
     args = parser.parse_args(argv)
     speed = parse_speed(args.speed, parser)
     glyphs = parse_charset(args.charset, parser)
     color = parse_color(args.color, parser)
+    glyphs = representable(
+        glyphs, terminal_encoding(), parser,
+        args.charset if args.charset in CHARSETS else "custom:",
+    )
 
     if not sys.stdout.isatty():
         sys.stderr.write(
@@ -398,7 +480,6 @@ def main(argv=None):
         )
         return 2
 
-    install_signal_handlers()
     try:
         curses.wrapper(run, glyphs, speed, color)
     except curses.error as exc:
