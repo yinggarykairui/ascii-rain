@@ -4,53 +4,71 @@
 One file, no dependencies. Columns of glyphs fall at their own speeds, the
 leading cell burns bright, the tail fades out behind it. Any key exits.
 
-Design constraints worth knowing before you edit:
+Design constraints worth knowing before editing:
 
 * Only the stdlib. `curses` ships with CPython on Unix; that is the whole
-  dependency list, and it is why this file will still run in five years.
-* The terminal must be restored on every exit path, including a crash. That
-  is what `curses.wrapper` buys us, so every curses call lives under it.
-* Bad input never reaches curses. Arguments are parsed and validated first,
-  so a typo exits with one line on stderr instead of a half-initialised
-  terminal.
+  dependency list, and it is why this file should still run in five years.
+* The terminal must be restored on every exit path. `curses.wrapper` handles
+  the normal ones; SIGHUP, SIGQUIT and SIGTERM are turned into exceptions so
+  they unwind through the same restore.
+* No terminal capability is assumed. A terminal without a hideable cursor, or
+  without colour, loses that feature and keeps the program.
+* Bad input never reaches curses. Arguments are parsed and validated first, so
+  a typo exits with one line on stderr instead of a half-initialised terminal.
 """
 
 import argparse
 import curses
 import random
+import signal
 import sys
 import time
+import unicodedata
 
 __version__ = "1.0.0"
 
 PROG = "ascii-rain"
+USAGE_PROG = "python3 ascii_rain.py"
 
-# Frame rate is fixed; --speed scales how fast drops fall, not how often we
-# redraw. Decoupling them keeps the animation smooth at every speed.
+# Frame rate is fixed; --speed scales how fast drops fall, not how often the
+# screen is redrawn. Decoupling them keeps the animation smooth at every speed.
 FPS = 30.0
+
+# Rows per second at --speed 1, before each column's own random factor. Slower
+# than this and the glyph churn reads louder than the falling, which turns the
+# rain into a static field that twinkles.
+BASE_ROWS_PER_SECOND = 4.5
+
+# Chance per frame that a live cell swaps its glyph, at --speed 1 and above.
+# Scaled down with --speed so slow rain does not become a strobe.
+CHURN = 0.22
 
 SPEED_MIN, SPEED_MAX = 0.1, 10.0
 
 # Half-width katakana and digits: every glyph here is one cell wide, which is
 # what keeps the columns aligned. Full-width kana would render two cells wide
-# and shear the field.
+# and shear the field. `blocks` is the exception, and --help says so.
 CHARSETS = {
     "matrix": "ｦｧｨｩｪｫｬｭｮｯｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789",
     "ascii": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-=+[]{};:,.<>/?",
     "binary": "01",
-    "blocks": "░▒▓█▄▀■□▪▫",
+    "blocks": "░▒▓█",
 }
 
-# name -> (head colour, body colour, tail colour). Curses gives us eight
-# reliable colours; brightness comes from A_BOLD and A_DIM on top of them.
+# name -> (head colour, body colour, tail colour). Curses gives eight reliable
+# colours; brightness comes from A_BOLD and A_DIM on top of them.
 COLORS = {
     "green": (curses.COLOR_WHITE, curses.COLOR_GREEN, curses.COLOR_GREEN),
     "amber": (curses.COLOR_WHITE, curses.COLOR_YELLOW, curses.COLOR_YELLOW),
-    "ice": (curses.COLOR_WHITE, curses.COLOR_CYAN, curses.COLOR_BLUE),
+    "ice": (curses.COLOR_WHITE, curses.COLOR_CYAN, curses.COLOR_CYAN),
     "mono": (curses.COLOR_WHITE, curses.COLOR_WHITE, curses.COLOR_WHITE),
 }
 
 PAIR_HEAD, PAIR_BODY, PAIR_TAIL = 1, 2, 3
+
+
+class Interrupted(Exception):
+    """A fatal signal, re-raised so the terminal restore path still runs."""
 
 
 class Parser(argparse.ArgumentParser):
@@ -63,21 +81,23 @@ class Parser(argparse.ArgumentParser):
 
 def build_parser():
     p = Parser(
-        prog=PROG,
+        prog=USAGE_PROG,
         description="Matrix-style rain for your terminal. Any key exits.",
-        epilog="Example: %s --charset binary --color ice --speed 2" % PROG,
+        epilog="Example: %s --charset binary --color ice --speed 2" % USAGE_PROG,
     )
     p.add_argument(
         "--speed",
         metavar="FLOAT",
         default="1.0",
-        help="fall speed multiplier, %g-%g (default: 1.0)" % (SPEED_MIN, SPEED_MAX),
+        help="fall speed multiplier, %.1f-%.1f (default: 1.0)"
+        % (SPEED_MIN, SPEED_MAX),
     )
     p.add_argument(
         "--charset",
         metavar="NAME",
         default="matrix",
-        help="glyph pool: %s, or custom:<chars> (default: matrix)"
+        help="glyph pool: %s, or custom:<chars> (default: matrix); blocks can "
+        "render double-width where ambiguous-width glyphs are treated as wide"
         % ", ".join(sorted(CHARSETS)),
     )
     p.add_argument(
@@ -95,20 +115,38 @@ def parse_speed(raw, parser):
         value = float(raw)
     except ValueError:
         parser.error("--speed wants a number, got %r" % raw)
+    # NaN fails this comparison, which is the right answer for NaN.
     if not (SPEED_MIN <= value <= SPEED_MAX):
         parser.error(
-            "--speed must be between %g and %g, got %g" % (SPEED_MIN, SPEED_MAX, value)
+            "--speed must be between %.1f and %.1f, got %g"
+            % (SPEED_MIN, SPEED_MAX, value)
         )
     return value
 
 
+def usable_glyph(ch):
+    """One printable, one-cell-wide, non-blank character.
+
+    A double-width glyph in a custom pool overwrites the neighbouring column
+    and shears the whole field; a pool of spaces silently draws nothing at
+    all. Both used to be accepted, and both looked like a broken program.
+    """
+    if not ch.isprintable() or ch.isspace():
+        return False
+    if unicodedata.combining(ch):
+        return False
+    return unicodedata.east_asian_width(ch) not in ("W", "F")
+
+
 def parse_charset(raw, parser):
     if raw.startswith("custom:"):
-        glyphs = raw[len("custom:") :]
-        # Newlines and tabs would move the cursor rather than paint a cell.
-        glyphs = "".join(dict.fromkeys(c for c in glyphs if c.isprintable()))
+        wanted = raw[len("custom:") :]
+        glyphs = "".join(dict.fromkeys(c for c in wanted if usable_glyph(c)))
         if not glyphs:
-            parser.error("--charset custom: needs at least one printable character")
+            parser.error(
+                "--charset custom: needs at least one printable, single-width, "
+                "non-blank character"
+            )
         return glyphs
     if raw not in CHARSETS:
         parser.error(
@@ -120,9 +158,7 @@ def parse_charset(raw, parser):
 
 def parse_color(raw, parser):
     if raw not in COLORS:
-        parser.error(
-            "--color %r is not one of: %s" % (raw, ", ".join(sorted(COLORS)))
-        )
+        parser.error("--color %r is not one of: %s" % (raw, ", ".join(sorted(COLORS))))
     return raw
 
 
@@ -139,12 +175,35 @@ class Drop:
         self.reset(height, speed, warm_start)
 
     def reset(self, height, speed, warm_start=False):
-        self.length = random.randint(max(3, height // 6), max(4, height))
-        self.speed = speed * random.uniform(0.45, 1.6) * FPS / 12.0
-        # Stagger the field so it never starts as one flat wave.
-        self.head = -random.uniform(0, height * 1.5) if not warm_start else \
-            random.uniform(0, height)
+        # The trail is stored as a fraction of the screen, not a row count, so
+        # a resize rescales it in both directions. Storing rows meant one
+        # shrink stunted every column that recycled while the screen was small
+        # — permanently, because growing back never lengthened anything.
+        self.fraction = random.uniform(1.0 / 6.0, 1.0)
+        self.clip(height)
+        self.speed = speed * random.uniform(0.5, 1.7) * BASE_ROWS_PER_SECOND
+        self.churn = CHURN * min(1.0, speed)
         self.cells = {}
+        # Only some columns start on screen. Warm-starting all of them opens
+        # at nearly twice the steady-state density, which reads as a burst
+        # that then thins out rather than as rain that was always falling.
+        if warm_start and random.random() < 0.55:
+            # Drop into the middle of the screen *with* a trail. A head and no
+            # trail reads as white confetti, which is what the first seconds of
+            # every run and every resize used to look like.
+            self.head = random.uniform(0, height)
+            top = int(self.head) - self.length + 1
+            for row in range(top, int(self.head) + 1):
+                if 0 <= row < height:
+                    self.cells[row] = random.choice(self.glyphs)
+        else:
+            # Stagger new columns above the screen so they never fall as one
+            # flat wave.
+            self.head = -random.uniform(0, height * 1.5)
+
+    def clip(self, height):
+        """Re-derive the trail length from the screen height, both ways."""
+        self.length = max(3, min(int(self.fraction * height), max(4, height)))
 
     def advance(self, height):
         previous = int(self.head)
@@ -153,8 +212,7 @@ class Drop:
         for row in range(previous + 1, current + 1):
             if 0 <= row < height:
                 self.cells[row] = random.choice(self.glyphs)
-        # Churn a live cell now and then so the tail is never static.
-        if self.cells and random.random() < 0.28:
+        if self.cells and random.random() < self.churn:
             row = random.choice(list(self.cells))
             self.cells[row] = random.choice(self.glyphs)
         # Cells that have fallen out of the trail are dead; drop them so the
@@ -164,7 +222,7 @@ class Drop:
             del self.cells[row]
         return self.head - self.length > height
 
-    def draw(self, win, x, height, width):
+    def draw(self, win, x, height, width, bold_body):
         head_row = int(self.head)
         for row, glyph in self.cells.items():
             distance = head_row - row
@@ -172,7 +230,7 @@ class Drop:
                 continue
             if distance == 0:
                 attr = curses.color_pair(PAIR_HEAD) | curses.A_BOLD
-            elif distance <= max(1, self.length // 5):
+            elif bold_body and distance <= max(1, self.length // 5):
                 attr = curses.color_pair(PAIR_BODY) | curses.A_BOLD
             elif distance <= self.length * 0.6:
                 attr = curses.color_pair(PAIR_BODY)
@@ -182,17 +240,19 @@ class Drop:
 
 
 def _put(win, y, x, glyph, attr, height, width):
-    """Write one cell, ignoring the bottom-right corner curses refuses to fill.
+    """Write one cell, including the bottom-right one curses refuses to fill.
 
     Writing the last cell of the last line scrolls or raises on most curses
-    builds; there is no portable way to do it, so that one cell stays dark.
+    builds. `insstr` writes it without advancing the cursor, which is the
+    portable way in — and on a 1x1 terminal it is the only cell there is.
     """
     if not (0 <= y < height and 0 <= x < width):
         return
-    if y == height - 1 and x == width - 1:
-        return
     try:
-        win.addstr(y, x, glyph, attr)
+        if y == height - 1 and x == width - 1:
+            win.insstr(y, x, glyph, attr)
+        else:
+            win.addstr(y, x, glyph, attr)
     except curses.error:
         # A narrow terminal can still refuse a write mid-resize. A missing
         # glyph is not worth tearing the screen down for.
@@ -200,7 +260,12 @@ def _put(win, y, x, glyph, attr, height, width):
 
 
 def init_colors(name):
-    """Set up the three pairs. Returns True if the terminal gave us colour."""
+    """Set up the three colour pairs. False if the terminal has no colour.
+
+    False is not an error: uninitialised pairs render in the terminal's default
+    foreground, and A_BOLD/A_DIM still separate head from body from tail. A
+    monochrome terminal gets monochrome rain.
+    """
     try:
         curses.start_color()
         curses.use_default_colors()
@@ -220,27 +285,38 @@ def init_colors(name):
 def build_field(width, height, glyphs, speed, warm_start, previous=None):
     """Grow or shrink the field, keeping the drops that already exist.
 
-    A resize that rebuilt every column would blank the screen and start the
-    rain over as one flat wave — the one moment the illusion is most visible.
-    Surviving columns keep falling; only the new ones are born.
+    Rebuilding every column on a resize blanked the screen and restarted the
+    rain — at the one moment the user is definitely looking. Surviving columns
+    keep falling; only the new ones are born.
     """
     field = list(previous[: max(1, width)]) if previous else []
     while len(field) < max(1, width):
         field.append(Drop(height, glyphs, speed, warm_start))
     for drop in field:
-        # A taller trail than the screen would never clear; a shorter screen
-        # also means the old trail length no longer makes sense.
-        drop.length = min(drop.length, max(4, height))
+        drop.clip(height)
     return field
 
 
 def run(stdscr, glyphs, speed, color):
-    curses.curs_set(0)
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        # No `civis` capability (vt100, ansi, xterm-mono, dumb...). A visible
+        # cursor parked in a corner is a blemish; refusing to start is not an
+        # option. This one unguarded call used to kill the program outright.
+        pass
+    try:
+        # Otherwise ncurses waits a full second on Escape to see whether an
+        # escape sequence follows — and Escape is the key people press to leave.
+        curses.set_escdelay(25)
+    except (AttributeError, curses.error):
+        pass
     stdscr.nodelay(True)
-    if not init_colors(color):
-        # No colour available: the mono palette is monochrome by definition,
-        # so falling back costs nothing but the hue. Not an error (§8).
-        init_colors("mono")
+    has_color = init_colors(color)
+    head_fg, body_fg, _ = COLORS[color]
+    # With one colour for both, a bold body tier is indistinguishable from the
+    # head, so mono (and any colourless terminal) drops that tier.
+    bold_body = has_color and head_fg != body_fg
 
     height, width = stdscr.getmaxyx()
     field = build_field(width, height, glyphs, speed, warm_start=True)
@@ -258,6 +334,9 @@ def run(stdscr, glyphs, speed, color):
             )
             continue
         if key != -1:
+            # Whatever else was typed or pasted is still in the tty buffer;
+            # without this it lands on the user's shell prompt — and runs.
+            curses.flushinp()
             return
 
         stdscr.erase()
@@ -266,7 +345,7 @@ def run(stdscr, glyphs, speed, color):
                 break
             if drop.advance(height):
                 drop.reset(height, speed)
-            drop.draw(stdscr, x, height, width)
+            drop.draw(stdscr, x, height, width, bold_body)
         stdscr.refresh()
 
         next_frame += frame
@@ -277,6 +356,26 @@ def run(stdscr, glyphs, speed, color):
             # Fell behind (a resize storm, a suspended process). Re-anchor
             # rather than sprinting to catch up on a backlog of frames.
             next_frame = time.monotonic()
+
+
+def install_signal_handlers():
+    """Turn fatal signals into an exception so the terminal is restored.
+
+    Ctrl-\\ (SIGQUIT) killed the process outright, leaving the user on the
+    alternate screen with echo off, needing `reset` to get their shell back.
+    SIGHUP did the same. SIGKILL cannot be caught and never will be.
+    """
+
+    def handler(signum, frame):
+        raise Interrupted(signum)
+
+    for name in ("SIGQUIT", "SIGHUP", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
 
 
 def main(argv=None):
@@ -291,13 +390,21 @@ def main(argv=None):
             "%s: stdout is not a terminal — there is nothing to draw on.\n" % PROG
         )
         return 2
+    if not sys.stdin.isatty():
+        # With no tty on stdin no keypress can ever arrive, so "any key exits"
+        # would be a lie and the only way out would be a signal.
+        sys.stderr.write(
+            "%s: stdin is not a terminal — no keypress could reach it.\n" % PROG
+        )
+        return 2
 
+    install_signal_handlers()
     try:
         curses.wrapper(run, glyphs, speed, color)
     except curses.error as exc:
         sys.stderr.write("%s: terminal error: %s\n" % (PROG, exc))
         return 2
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, Interrupted):
         pass
     return 0
 
