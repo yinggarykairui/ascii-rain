@@ -220,7 +220,7 @@ class Drop:
             # a glyph being replaced by itself.
             glyph = random.choice(self.glyphs)
             if len(self.glyphs) > 1 and glyph == self.cells[row]:
-                glyph = random.choice(self.glyphs.replace(glyph, ""))
+                glyph = random.choice(self.glyphs.replace(glyph, "") or self.glyphs)
             self.cells[row] = glyph
         # Cells that have fallen out of the trail are dead; drop them so the
         # dict cannot grow without bound on a long-running screensaver.
@@ -338,6 +338,10 @@ def run(stdscr, glyphs, speed, color):
     next_frame = time.monotonic()
 
     while True:
+        if SHUTDOWN:
+            # A signal fired and something ate the exception on its way out
+            # (curses.wrapper has a bare `except` of its own). Leave anyway.
+            return
         key = stdscr.getch()
         if key == curses.KEY_RESIZE:
             curses.update_lines_cols()
@@ -374,6 +378,10 @@ def run(stdscr, glyphs, speed, color):
 
 CATCHABLE = ("SIGINT", "SIGQUIT", "SIGHUP", "SIGTERM")
 
+# Set by the first fatal signal. Read by the frame loop, so a shutdown still
+# happens even if the exception is swallowed on its way out.
+SHUTDOWN = False
+
 
 def install_signal_handlers():
     """Turn fatal signals into an exception so the terminal is restored.
@@ -382,21 +390,21 @@ def install_signal_handlers():
     alternate screen with echo off, needing `reset` to get their shell back.
     SIGHUP did the same. SIGKILL cannot be caught and never will be.
 
-    The first signal disarms all the others. Two arriving in the same
-    interpreter tick — `^C^\\` pasted as one write, or a supervisor sending
-    SIGINT then SIGTERM — used to raise the second exception *inside* the
-    restore the first one had started, which left the terminal exactly as
-    broken as no handler at all, and then exited 0 about it.
+    Only the first signal raises. Two arriving in the same interpreter tick —
+    `^C^\\` pasted as one write, or a supervisor sending SIGINT then SIGTERM —
+    used to raise the second exception *inside* the restore the first one had
+    started, which left the terminal exactly as broken as no handler at all.
+    Later signals return instead, so the restore always finishes.
     """
 
-    handled = []
-
     def handler(signum, frame):
-        for sig in handled:
-            try:
-                signal.signal(sig, signal.SIG_IGN)
-            except (ValueError, OSError):
-                pass
+        global SHUTDOWN
+        if SHUTDOWN:
+            # Already unwinding. Raising again here would land inside the
+            # restore the first signal started, which is the whole bug. Do
+            # nothing and let the first exception finish its work.
+            return
+        SHUTDOWN = True
         raise Interrupted(signum)
 
     for name in CATCHABLE:
@@ -406,8 +414,7 @@ def install_signal_handlers():
         try:
             signal.signal(sig, handler)
         except (ValueError, OSError):
-            continue
-        handled.append(sig)
+            pass
 
 
 def terminal_encoding():
@@ -439,7 +446,7 @@ def representable(glyphs, encoding, parser, charset_name):
         keep += ch
     if not keep:
         parser.error(
-            "this terminal's encoding (%s) cannot render the %s glyphs — try "
+            "this terminal's encoding (%s) cannot render the %s glyphs - try "
             "--charset ascii or --charset binary, or a UTF-8 locale"
             % (encoding, charset_name)
         )
@@ -456,7 +463,15 @@ def main(argv=None):
     # Before anything else: a signal during argument parsing should not be able
     # to outrun the handler that makes it exit cleanly.
     install_signal_handlers()
+    try:
+        return _main(argv)
+    except (KeyboardInterrupt, Interrupted):
+        # Everything from argument parsing to teardown is inside this, because
+        # a signal at any of those moments used to print a traceback.
+        return 0
 
+
+def _main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     speed = parse_speed(args.speed, parser)
@@ -464,19 +479,19 @@ def main(argv=None):
     color = parse_color(args.color, parser)
     glyphs = representable(
         glyphs, terminal_encoding(), parser,
-        args.charset if args.charset in CHARSETS else "custom:",
+        args.charset if args.charset in CHARSETS else "custom pool",
     )
 
     if not sys.stdout.isatty():
         sys.stderr.write(
-            "%s: stdout is not a terminal — there is nothing to draw on.\n" % PROG
+            "%s: stdout is not a terminal - there is nothing to draw on.\n" % PROG
         )
         return 2
     if not sys.stdin.isatty():
         # With no tty on stdin no keypress can ever arrive, so "any key exits"
         # would be a lie and the only way out would be a signal.
         sys.stderr.write(
-            "%s: stdin is not a terminal — no keypress could reach it.\n" % PROG
+            "%s: stdin is not a terminal - no keypress could reach it.\n" % PROG
         )
         return 2
 
@@ -485,8 +500,6 @@ def main(argv=None):
     except curses.error as exc:
         sys.stderr.write("%s: terminal error: %s\n" % (PROG, exc))
         return 2
-    except (KeyboardInterrupt, Interrupted):
-        pass
     return 0
 
 

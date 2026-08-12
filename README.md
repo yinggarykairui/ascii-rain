@@ -75,8 +75,8 @@ CI runners hand you — glyphs that cannot be encoded are dropped, with a line o
 stderr saying how many. If nothing is left, it says so and exits `2` rather than
 drawing a blank screen.
 
-**Glyph pools.** A `custom:` pool is filtered to printable, non-blank, non-double-
-width characters, since a double-width glyph shears the column grid and a pool of
+**Glyph pools.** A `custom:` pool is filtered to printable, non-blank and
+not double-width, since a double-width glyph shears the column grid and a pool of
 spaces draws nothing at all. Three of the four `blocks` glyphs are
 "ambiguous-width" and will render double on terminals configured to treat them
 that way; the other charsets are single-width throughout.
