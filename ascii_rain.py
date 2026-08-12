@@ -500,6 +500,16 @@ def _main(argv=None):
     except curses.error as exc:
         sys.stderr.write("%s: terminal error: %s\n" % (PROG, exc))
         return 2
+    finally:
+        # curses.wrapper only restores if its own `stdscr` name got bound. A
+        # signal landing in the ~1 ms inside initscr() beats that binding, and
+        # the screen is already in raw mode by then: exit 0, no output, and a
+        # shell that needs `reset`. This is the backstop for that window.
+        try:
+            if not curses.isendwin():
+                curses.endwin()
+        except curses.error:
+            pass
     return 0
 
 
