@@ -217,8 +217,21 @@ def init_colors(name):
     return True
 
 
-def build_field(width, height, glyphs, speed, warm_start):
-    return [Drop(height, glyphs, speed, warm_start) for _ in range(max(1, width))]
+def build_field(width, height, glyphs, speed, warm_start, previous=None):
+    """Grow or shrink the field, keeping the drops that already exist.
+
+    A resize that rebuilt every column would blank the screen and start the
+    rain over as one flat wave — the one moment the illusion is most visible.
+    Surviving columns keep falling; only the new ones are born.
+    """
+    field = list(previous[: max(1, width)]) if previous else []
+    while len(field) < max(1, width):
+        field.append(Drop(height, glyphs, speed, warm_start))
+    for drop in field:
+        # A taller trail than the screen would never clear; a shorter screen
+        # also means the old trail length no longer makes sense.
+        drop.length = min(drop.length, max(4, height))
+    return field
 
 
 def run(stdscr, glyphs, speed, color):
@@ -240,7 +253,9 @@ def run(stdscr, glyphs, speed, color):
             curses.update_lines_cols()
             height, width = stdscr.getmaxyx()
             stdscr.erase()
-            field = build_field(width, height, glyphs, speed, warm_start=True)
+            field = build_field(
+                width, height, glyphs, speed, warm_start=True, previous=field
+            )
             continue
         if key != -1:
             return
