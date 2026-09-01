@@ -866,14 +866,16 @@ def _main(argv=None):
 
     if not sys.stdout.isatty():
         sys.stderr.write(
-            "%s: stdout is not a terminal - there is nothing to draw on.\n" % PROG
+            "%s: stdout is not a terminal - there is nothing to draw on. Run "
+            "it in a terminal rather than a pipe or a file.\n" % PROG
         )
         return 2
     if not sys.stdin.isatty():
         # With no tty on stdin no keypress can ever arrive, so "any key exits"
         # would be a lie and the only way out would be a signal.
         sys.stderr.write(
-            "%s: stdin is not a terminal - no keypress could reach it.\n" % PROG
+            "%s: stdin is not a terminal - no keypress could reach it. Run it "
+            "in a terminal rather than under a redirect.\n" % PROG
         )
         return 2
 
@@ -886,8 +888,19 @@ def _main(argv=None):
 
     try:
         curses.wrapper(run, glyphs, speed, color)
-    except curses.error as exc:
-        sys.stderr.write("%s: terminal error: %s\n" % (PROG, exc))
+    except curses.error:
+        # A window closing or a connection dropping takes the terminal out
+        # from under curses, and curses reports it as an ERR from whichever
+        # call was in flight — `nocbreak() returned ERR`, which named a C
+        # function at a user who had just closed a window. If a signal came
+        # with it (a closing terminal sends SIGHUP), that signal is the whole
+        # story and main() is about to re-raise it: 129 at the shell, and no
+        # line, because there is no terminal left to read one on.
+        if not SHUTDOWN:
+            sys.stderr.write(
+                "%s: the terminal went away - the window closed, or the "
+                "connection dropped.\n" % PROG
+            )
         return 2
     finally:
         # curses.wrapper only restores if its own `stdscr` name got bound. A
