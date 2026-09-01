@@ -175,6 +175,17 @@ def parse_speed(raw, parser):
     return value
 
 
+# The pictograph blocks of plane 1. Unicode's East_Asian_Width table calls a
+# good part of this range Neutral — U+1F327 CLOUD WITH RAIN is `N`, and so is
+# every regional indicator — while terminals draw all of it two cells wide, so
+# the width test alone let `--charset custom:🌧` through and it sheared the
+# grid with no warning. The emoji that live *below* this range (⌚, ⚡, ⭐) are
+# already W in the table and were already rejected. Ambiguous-width characters
+# are deliberately not touched: Cyrillic, Greek, ① and the box-drawing set stay
+# accepted, which is the trade the README's Glyph pools paragraph describes.
+EMOJI_FIRST, EMOJI_LAST = 0x1F000, 0x1FAFF
+
+
 def usable_glyph(ch):
     """One printable, one-cell-wide, non-blank character.
 
@@ -184,7 +195,13 @@ def usable_glyph(ch):
     """
     if not ch.isprintable() or ch.isspace():
         return False
-    if unicodedata.combining(ch):
+    # Every mark, not just the ones with a non-zero combining class. U+FE0F
+    # (variation selector 16) is a mark whose combining class is 0, so the old
+    # test passed it and it was drawn as a glyph: hundreds of invisible cells
+    # scattered through the field.
+    if unicodedata.category(ch).startswith("M"):
+        return False
+    if EMOJI_FIRST <= ord(ch) <= EMOJI_LAST:
         return False
     return unicodedata.east_asian_width(ch) not in ("W", "F")
 
