@@ -98,12 +98,25 @@ class Parser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
-def build_parser():
+def build_parser(scout=False):
+    """The real parser, or a scout of it that cannot exit on its own.
+
+    argparse fires `--help` and `--version` the instant it reaches them, so
+    `--version --bogus` printed the version and exited 0 with the mistake
+    unread — and so did `--help --bogus`. The scout is the same parser with
+    those two turned into ordinary flags that store instead of exiting, which
+    makes it safe to run first, purely to find the words this program has no
+    use for. Every other spelling, default and abbreviation is identical, so
+    what the scout accepts is what the real parser accepts.
+    """
     p = Parser(
         prog=USAGE_PROG,
         description="Matrix-style rain for your terminal. Any key exits.",
         epilog="Example: %s --charset binary --color ice --speed 2" % USAGE_PROG,
+        add_help=not scout,
     )
+    if scout:
+        p.add_argument("-h", "--help", action="store_true")
     p.add_argument(
         "--speed",
         metavar="FLOAT",
@@ -125,13 +138,36 @@ def build_parser():
         default="green",
         help="palette: %s (default: green)" % ", ".join(sorted(COLORS)),
     )
-    p.add_argument("--version", action="version", version="%s %s" % (PROG, __version__))
+    if scout:
+        p.add_argument("--version", action="store_true")
+    else:
+        p.add_argument(
+            "--version", action="version", version="%s %s" % (PROG, __version__)
+        )
     return p
 
 
 # The three flags that take a value. A `--` sitting in one of these slots is
 # that flag's argument to reject, not an end-of-options marker to consume.
 VALUE_FLAGS = ("--speed", "--charset", "--color")
+
+
+def takes_a_value(arg):
+    """True if `arg` is a spelling of a flag that claims the next word.
+
+    argparse accepts any unambiguous prefix of a long option, so `--sp` is
+    `--speed` and `--cha` is `--charset`. Matching VALUE_FLAGS by equality saw
+    neither, and a `--` sitting in an abbreviated flag's value slot was eaten
+    as an end-of-options marker: `--sp -- 2` reported `unexpected argument: 2`
+    where `--speed -- 2` correctly reported a missing value. An *ambiguous*
+    prefix (`--c`) counts here too — argparse will refuse it by name, and that
+    refusal is the truthful one, so nothing behind it should be consumed first.
+
+    `--speed=2` carries its own value and claims nothing.
+    """
+    if not arg.startswith("--") or "=" in arg:
+        return False
+    return any(flag.startswith(arg) for flag in VALUE_FLAGS)
 
 
 def consume_end_of_options(argv, parser):
@@ -157,7 +193,7 @@ def consume_end_of_options(argv, parser):
                 parser.error("unexpected argument: %r" % rest[0])
             return kept
         kept.append(arg)
-        expecting_value = arg in VALUE_FLAGS
+        expecting_value = takes_a_value(arg)
     return kept
 
 
@@ -169,8 +205,8 @@ def parse_speed(raw, parser):
     # NaN fails this comparison, which is the right answer for NaN.
     if not (SPEED_MIN <= value <= SPEED_MAX):
         parser.error(
-            "--speed must be between %.1f and %.1f, got %g"
-            % (SPEED_MIN, SPEED_MAX, value)
+            "--speed must be between %.1f and %.1f, got %r"
+            % (SPEED_MIN, SPEED_MAX, raw)
         )
     return value
 
@@ -723,7 +759,16 @@ def _main(argv=None):
     parser = build_parser()
     if argv is None:
         argv = sys.argv[1:]
-    args = parser.parse_args(consume_end_of_options(argv, parser))
+    argv = consume_end_of_options(argv, parser)
+    # One wording for one mistake. `ascii_rain.py a` used to reach argparse's
+    # plural ("unrecognized arguments: a") while `ascii_rain.py -- a` reached
+    # the line above ("unexpected argument: 'a'") — two voices for a word the
+    # program has no use for. The scout finds it either way, and finds it
+    # *before* --help or --version can exit 0 over the top of it.
+    _, extra = build_parser(scout=True).parse_known_args(argv)
+    if extra:
+        parser.error("unexpected argument: %r" % extra[0])
+    args = parser.parse_args(argv)
     speed = parse_speed(args.speed, parser)
     glyphs = parse_charset(args.charset, parser)
     color = parse_color(args.color, parser)
