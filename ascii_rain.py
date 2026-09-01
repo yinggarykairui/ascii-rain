@@ -697,7 +697,7 @@ def die_by_signal(signum):
         # the file claims 3.8 and costs two lines to mean it.
         os.kill(os.getpid(), signum)
     # Only reachable if the signal is blocked or ignored process-wide, which is
-    # the caller's arrangement, not ours. Report it the way a shell would.
+    # the caller's arrangement, not this program's. Report it as a shell would.
     return 128 + signum
 
 
