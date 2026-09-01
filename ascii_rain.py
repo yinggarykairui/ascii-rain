@@ -10,7 +10,9 @@ Design constraints worth knowing before editing:
   dependency list, and it is why this file should still run in five years.
 * The terminal must be restored on every exit path. `curses.wrapper` handles
   the normal ones; SIGHUP, SIGQUIT and SIGTERM are turned into exceptions so
-  they unwind through the same restore.
+  they unwind through the same restore — and are then re-raised at self with
+  the default handler, so the process is *killed by* the signal it caught and
+  exit 0 keeps meaning "a key was pressed".
 * No terminal capability is assumed. A terminal without a hideable cursor, or
   without colour, loses that feature and keeps the program.
 * Bad input never reaches curses. Arguments are parsed and validated first, so
@@ -20,6 +22,7 @@ Design constraints worth knowing before editing:
 import argparse
 import curses
 import locale
+import os
 import random
 import signal
 import sys
@@ -378,9 +381,12 @@ def run(stdscr, glyphs, speed, color):
 
 CATCHABLE = ("SIGINT", "SIGQUIT", "SIGHUP", "SIGTERM")
 
-# Set by the first fatal signal. Read by the frame loop, so a shutdown still
-# happens even if the exception is swallowed on its way out.
-SHUTDOWN = False
+# The signal number that started the shutdown, or 0. Read by the frame loop, so
+# a shutdown still happens even if the exception is swallowed on its way out —
+# and read again on the way out of main(), which is why it stores the signum
+# rather than a bare flag: that backstop returns normally, and the process must
+# still die *of the signal* rather than exit 0.
+SHUTDOWN = 0
 
 
 def install_signal_handlers():
@@ -404,7 +410,7 @@ def install_signal_handlers():
             # restore the first signal started, which is the whole bug. Do
             # nothing and let the first exception finish its work.
             return
-        SHUTDOWN = True
+        SHUTDOWN = signum
         raise Interrupted(signum)
 
     for name in CATCHABLE:
@@ -459,16 +465,55 @@ def representable(glyphs, encoding, parser, charset_name):
     return keep
 
 
+def die_by_signal(signum):
+    """Finish the job the signal started: die of it, now that the screen is back.
+
+    Catching a fatal signal to restore the terminal is right; exiting 0
+    afterwards is not. A shell reports `^C` as 130 and a supervisor decides
+    whether to restart from `WIFSIGNALED`, and both were being told the
+    screensaver had finished normally. So the handler's disposition goes back to
+    the default and the signal is raised again at this process, which never
+    returns. Called only after the terminal restore has completed.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        # Nothing buffered may be lost: the re-raise below does not unwind, so
+        # interpreter shutdown never runs and never flushes these.
+        try:
+            stream.flush()
+        except (ValueError, OSError):
+            pass
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+    except (ValueError, OSError):
+        return 128 + signum
+    try:
+        signal.raise_signal(signum)
+    except AttributeError:
+        # signal.raise_signal is 3.8+; this is the older spelling, kept because
+        # the file claims 3.8 and costs two lines to mean it.
+        os.kill(os.getpid(), signum)
+    # Only reachable if the signal is blocked or ignored process-wide, which is
+    # the caller's arrangement, not ours. Report it the way a shell would.
+    return 128 + signum
+
+
 def main(argv=None):
     # Before anything else: a signal during argument parsing should not be able
     # to outrun the handler that makes it exit cleanly.
     install_signal_handlers()
     try:
-        return _main(argv)
+        status = _main(argv)
     except (KeyboardInterrupt, Interrupted):
         # Everything from argument parsing to teardown is inside this, because
         # a signal at any of those moments used to print a traceback.
-        return 0
+        return die_by_signal(SHUTDOWN or signal.SIGINT)
+    if SHUTDOWN:
+        # The frame loop's backstop: a signal fired, the exception was eaten on
+        # its way out (curses.wrapper has a bare `except` of its own) and the
+        # loop returned normally instead. The terminal is restored either way,
+        # so the only thing left to get right is the exit status.
+        return die_by_signal(SHUTDOWN)
+    return status
 
 
 def _main(argv=None):
