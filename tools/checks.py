@@ -199,7 +199,42 @@ def describe_status(status):
     return "exited %d" % os.WEXITSTATUS(status)
 
 
+# A signal landing inside importlib's machinery — most often the weakref
+# callback that releases a module lock, which the garbage collector can run at
+# any allocation — used to raise where the exception had nowhere to go: CPython
+# printed `Exception ignored in: <function _get_module_lock.<locals>.cb ...>`
+# and a traceback naming ascii_rain.py, about one startup-signalled run in a
+# hundred. Holding the import lock and signalling makes that window
+# deterministic instead of one-in-a-hundred.
+IMPORT_LOCK_PROBE = """
+import _imp, os, signal, sys
+sys.path.insert(0, {root})
+import ascii_rain
+ascii_rain.install_signal_handlers()
+_imp.acquire_lock()
+try:
+    os.kill(os.getpid(), signal.SIGINT)
+finally:
+    _imp.release_lock()
+sys.stdout.write("shutdown=" + str(ascii_rain.SHUTDOWN))
+"""
+
+
+def check_import_lock_handler():
+    probe = subprocess.run(
+        [sys.executable, "-c", IMPORT_LOCK_PROBE.format(root=repr(ROOT))],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    err = probe.stderr.decode("utf-8", "replace")
+    check("signals: a signal during an import prints nothing",
+          probe.returncode == 0 and err == ""
+          and probe.stdout.decode() == "shutdown=%d" % int(signal.SIGINT),
+          "exit %d, stdout %r, stderr %r"
+          % (probe.returncode, probe.stdout.decode()[:40], err.strip()[:60]))
+
+
 def group_signals():
+    check_import_lock_handler()
     term = "xterm-256color"
     rmcup, rmkx = restore_suffix(term)
 
@@ -399,6 +434,43 @@ def group_args():
               code == 2 and len(lines) == 1 and wanted in err
               and "Traceback" not in err and out == "",
               "exit %d, %d line(s): %s" % (code, len(lines), err.strip()[:70]))
+
+    # A bad *value* next to --help used to be read past: `--speed 99 --help`
+    # printed the help and exited 0, while `--bogus --help` exited 2. One
+    # sentence in the README, two behaviours in the program.
+    for args in (["--speed", "99", "--help"], ["--charset", "zzz", "--help"],
+                 ["--color", "zzz", "-h"], ["--speed", "99", "--version"]):
+        code, out, err = cli(args)
+        check("args: %s exits 2, not 0" % " ".join(args),
+              code == 2 and out == "" and args[1] in err,
+              "exit %d: %s" % (code, err.strip()[:70]))
+
+    # A custom pool that loses glyphs says so, in the voice the non-UTF-8
+    # locale message already uses. Silence read as the program ignoring what
+    # was asked for.
+    code, _, err = cli(["--charset", "custom:A\U0001f327B"])
+    check("args: a custom: pool names the glyphs it dropped",
+          "1 of 3 custom glyphs" in err,
+          err.strip().splitlines()[0][:80] if err.strip() else "(silent)")
+
+    # The emoji fence is the emoji blocks, not the whole of plane 1. U+1F130
+    # (Ambiguous) and U+1F0A1 (Neutral) are narrow and stay; the rain cloud is
+    # drawn wide by every terminal and goes, whatever the width table says.
+    for glyphs, wanted in (("\u2460", True), ("\u0416", True), ("\u250c", True),
+                           ("\U0001f130", True), ("\U0001f0a1", True),
+                           ("\U0001f327", False), ("\U0001f600", False)):
+        code, _, err = cli(["--charset", "custom:" + glyphs])
+        accepted = "stdout is not a terminal" in err
+        check("args: custom:%s is %s" % (ascii(glyphs).strip("'"),
+                                         "accepted" if wanted else "refused"),
+              accepted == wanted, err.strip()[:70])
+
+    # repr() escapes control characters; it does not bound length, and a
+    # 5 KB argument printed 5 KB of stderr.
+    code, _, err = cli(["--color", "Z" * 5000])
+    check("args: a very long value is quoted short",
+          code == 2 and len(err) < 300 and "truncated" in err,
+          "%d characters of stderr" % len(err))
 
     for args in (["--help"], ["--version"]):
         code, out, err = cli(args)
