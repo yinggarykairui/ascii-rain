@@ -497,6 +497,41 @@ def die_by_signal(signum):
     return 128 + signum
 
 
+def unanimatable_terminal():
+    """Why this TERM cannot be animated, or None if it can.
+
+    Run before curses is entered, so a refusal leaves the screen untouched.
+    `TERM=dumb` is the case that matters: it has no `cup`, no way to address
+    the cursor, so every frame lands on the same line. The program used to draw
+    one screenful and then rewrite its last line forever, which looks exactly
+    like a hang. Refusing is the honest answer, and it is the same shape as the
+    `stdout is not a terminal` refusal above it.
+    """
+    term = os.environ.get("TERM", "")
+    try:
+        curses.setupterm()
+    except (curses.error, ValueError, OSError, TypeError) as exc:
+        # Unknown TERM, or no terminfo database at all. Reaching curses.wrapper
+        # with this would come back as an opaque `terminal error:` after the
+        # screen had already been entered.
+        return (
+            "TERM=%s is not a terminal type this system knows (%s) - set TERM "
+            "to one your terminfo database has, such as xterm or vt100."
+            % (term or "(unset)", exc)
+        )
+    try:
+        cup = curses.tigetstr("cup")
+    except curses.error:
+        cup = None
+    if cup is None:
+        return (
+            "TERM=%s has no cursor addressing, so there is nothing to animate "
+            "with - set TERM to a full-screen terminal type such as xterm or "
+            "vt100." % (term or "(unset)",)
+        )
+    return None
+
+
 def main(argv=None):
     # Before anything else: a signal during argument parsing should not be able
     # to outrun the handler that makes it exit cleanly.
@@ -538,6 +573,11 @@ def _main(argv=None):
         sys.stderr.write(
             "%s: stdin is not a terminal - no keypress could reach it.\n" % PROG
         )
+        return 2
+
+    refusal = unanimatable_terminal()
+    if refusal is not None:
+        sys.stderr.write("%s: %s\n" % (PROG, refusal))
         return 2
 
     try:
