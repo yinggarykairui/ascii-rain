@@ -67,30 +67,17 @@ way out, so a paste that happens to start with a key does not end up running in
 your shell.
 
 **Exit status.** A keypress exit is `0`, and that is the only thing `0` means.
-`Ctrl-C` and `Ctrl-\` typed at the keyboard are keypresses here, not signals, so
-they exit `0` as well. The statuses a shell reports for those two belong to the
-signals themselves, which reach this program only when something else sends
+`Ctrl-C` and `Ctrl-\` typed at the keyboard are keypresses here, not signals,
+so they exit `0` as well. The statuses a shell reports for those two belong to
+the signals themselves, which reach this program only when something else sends
 them: a signal is re-raised with its default handler once the terminal is back,
 so a shell or a supervisor sees the process killed by it — `130` for `SIGINT`,
-`143` for `SIGTERM`, `129` for `SIGHUP`, and `131` for `SIGQUIT`, which keeps its
-default disposition and will write a core file on a system that has them
-enabled. Bad input is `2`.
-
-**The startup window.** A few milliseconds at the very beginning belong to
-CPython rather than to this program, and `SIGINT` is the signal that notices.
-While the interpreter is still importing its own `site` module — between about
-five and fifteen milliseconds after `exec` here, before the first line of
-`ascii_rain.py` runs — a `SIGINT` does not become `130`. It aborts the
-interpreter with `Fatal Python error: init_import_site` and exit `1`, with a
-traceback on stderr; signalling at a random point in the first 30 ms, 5 runs in
-30 landed there. Nothing in the script can fix that, because no script is
-running yet. Nothing is left broken either: the screen has not been touched.
-`SIGTERM` has no such window — 30 runs in 30 killed the process correctly — so a
-caller that needs certainty at startup should send `SIGTERM`, or `SIGKILL`.
-Earlier still, in the gap between a launcher's `fork` and its `exec`, the signal
-is not this process's at all: if the launcher is itself a Python program, its own
-handler absorbs the `SIGINT` and `exec` throws the record away, and the rain
-keeps falling.
+`143` for `SIGTERM`, `129` for `SIGHUP`, and `131` for `SIGQUIT`, which keeps
+its default disposition and will write a core file on a system that has them
+enabled. Bad input, and a terminal that cannot be drawn on, are `2`. A signal
+landing before the interpreter has finished starting never reaches this
+program, so its status is CPython's and nothing here is broken; send `SIGTERM`
+or `SIGKILL` for certainty at startup.
 
 **Terminals.** A terminal with no colour renders in your default foreground
 instead of failing, and so does one that cannot hide its cursor — `vt100`,
