@@ -310,7 +310,7 @@ class Drop:
                 # No `dim` to step down with. The tail is thinned instead: the
                 # cells that lost their coin flip are just not drawn once they
                 # reach this tier, so the trail still ends fainter than it
-                # started. vt100, ansi and xterm-mono all land here.
+                # started. vt100, ansi, xterm-mono and linux all land here.
                 attr = curses.color_pair(PAIR_TAIL)
             else:
                 continue
@@ -360,18 +360,36 @@ def init_colors(name):
     return True
 
 
-def has_dim():
-    """True if this terminal can render a dimmer tier at all.
+# Bit 4 of terminfo's `ncv` (no_color_video) is A_DIM: the terminal cannot
+# combine dim with colour. The other bits name the other attributes; only this
+# one matters here.
+NCV_DIM = 16
 
-    `xterm-256color` emits ESC[2m for A_DIM. `vt100`, `ansi` and `xterm-mono`
-    have no `dim` string, so ncurses silently drops the attribute and the tail
-    used to render identically to the body — a trail that stepped down once
-    where it claimed to step down twice.
+
+def has_dim(has_color):
+    """True if this terminal can render a dimmer tier *as it will be used*.
+
+    Two ways to lose it, and the second one is why this takes an argument.
+    `vt100`, `ansi` and `xterm-mono` have no `dim` string at all. `TERM=linux`
+    does have one — and also `ncv#18`, which tells ncurses that dim cannot be
+    combined with colour, so ncurses drops A_DIM the moment a colour pair is in
+    use and the tail comes out byte-identical to the body: two visible tiers on
+    a trail documented to step down twice. Asking terminfo alone got that wrong.
+
+    With no colour there is no pair to combine with, so `ncv` does not apply and
+    a dim string is enough.
     """
     try:
-        return curses.tigetstr("dim") is not None
+        if curses.tigetstr("dim") is None:
+            return False
+        ncv = curses.tigetnum("ncv")
     except curses.error:
         return False
+    # tigetnum answers -1 for an absent capability and -2 for one of the wrong
+    # type; neither is a mask.
+    if has_color and ncv > 0 and ncv & NCV_DIM:
+        return False
+    return True
 
 
 def sane_window_env():
@@ -466,7 +484,7 @@ def run(stdscr, glyphs, speed, color):
     # With one colour for both, a bold body tier is indistinguishable from the
     # head, so mono (and any colourless terminal) drops that tier.
     bold_body = has_color and head_fg != body_fg
-    dim = has_dim()
+    dim = has_dim(has_color)
 
     height, width = window_size(stdscr)
     field = build_field(width, height, glyphs, speed, warm_start=True)
