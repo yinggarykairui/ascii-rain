@@ -49,6 +49,12 @@ CHURN = 0.22
 
 SPEED_MIN, SPEED_MAX = 0.1, 10.0
 
+# On a terminal with no `dim` capability the tail cannot step down in
+# brightness, so it steps down in density instead: this is the chance a cell
+# has of still being drawn once it falls past the body tier. Half is enough to
+# read as a fainter section without the trail breaking into dashes.
+TAIL_SURVIVAL = 0.5
+
 # Half-width katakana and digits: every glyph here is one cell wide, which is
 # what keeps the columns aligned. Full-width kana would render two cells wide
 # and shear the field. `blocks` is the exception, and --help says so.
@@ -172,6 +178,11 @@ class Drop:
     `head` is a float row so speed is smooth between frames; only its integer
     part decides which cells are lit. Glyphs are generated once per cell and
     then occasionally churned, which is what makes the trail shimmer.
+
+    Each cell in `cells` is `(glyph, survives)`. `survives` is the coin flip
+    for the no-`dim` tail, taken once when the cell is born and never again:
+    re-rolling it per frame turns the tail into a strobe, while deciding once
+    lets the trail dissolve as it falls.
     """
 
     def __init__(self, height, glyphs, speed, warm_start=False):
@@ -199,11 +210,16 @@ class Drop:
             top = int(self.head) - self.length + 1
             for row in range(top, int(self.head) + 1):
                 if 0 <= row < height:
-                    self.cells[row] = random.choice(self.glyphs)
+                    self.spawn(row)
         else:
             # Stagger new columns above the screen so they never fall as one
             # flat wave.
             self.head = -random.uniform(0, height * 1.5)
+
+    def spawn(self, row):
+        """Light one cell: a glyph, and its one-time tail coin flip."""
+        self.cells[row] = (random.choice(self.glyphs),
+                           random.random() < TAIL_SURVIVAL)
 
     def clip(self, height):
         """Re-derive the trail length from the screen height, both ways."""
@@ -215,16 +231,19 @@ class Drop:
         current = int(self.head)
         for row in range(previous + 1, current + 1):
             if 0 <= row < height:
-                self.cells[row] = random.choice(self.glyphs)
+                self.spawn(row)
         if self.cells and random.random() < self.churn:
             row = random.choice(list(self.cells))
+            current_glyph, survives = self.cells[row]
             # Re-pick if the draw matched what is already there: with a
             # two-glyph pool like `binary`, half of every column's shimmer was
             # a glyph being replaced by itself.
             glyph = random.choice(self.glyphs)
-            if len(self.glyphs) > 1 and glyph == self.cells[row]:
+            if len(self.glyphs) > 1 and glyph == current_glyph:
                 glyph = random.choice(self.glyphs.replace(glyph, "") or self.glyphs)
-            self.cells[row] = glyph
+            # The coin flip rides along unchanged; churn swaps the glyph, not
+            # the cell's fate.
+            self.cells[row] = (glyph, survives)
         # Cells that have fallen out of the trail are dead; drop them so the
         # dict cannot grow without bound on a long-running screensaver.
         cutoff = int(self.head) - self.length
@@ -232,9 +251,9 @@ class Drop:
             del self.cells[row]
         return self.head - self.length > height
 
-    def draw(self, win, x, height, width, bold_body):
+    def draw(self, win, x, height, width, bold_body, dim):
         head_row = int(self.head)
-        for row, glyph in self.cells.items():
+        for row, (glyph, survives) in self.cells.items():
             distance = head_row - row
             if distance < 0 or distance >= self.length:
                 continue
@@ -244,8 +263,16 @@ class Drop:
                 attr = curses.color_pair(PAIR_BODY) | curses.A_BOLD
             elif distance <= self.length * 0.6:
                 attr = curses.color_pair(PAIR_BODY)
-            else:
+            elif dim:
                 attr = curses.color_pair(PAIR_TAIL) | curses.A_DIM
+            elif survives:
+                # No `dim` to step down with. The tail is thinned instead: the
+                # cells that lost their coin flip are just not drawn once they
+                # reach this tier, so the trail still ends fainter than it
+                # started. vt100, ansi and xterm-mono all land here.
+                attr = curses.color_pair(PAIR_TAIL)
+            else:
+                continue
             _put(win, row, x, glyph, attr, height, width)
 
 
@@ -292,6 +319,20 @@ def init_colors(name):
     return True
 
 
+def has_dim():
+    """True if this terminal can render a dimmer tier at all.
+
+    `xterm-256color` emits ESC[2m for A_DIM. `vt100`, `ansi` and `xterm-mono`
+    have no `dim` string, so ncurses silently drops the attribute and the tail
+    used to render identically to the body — a trail that stepped down once
+    where it claimed to step down twice.
+    """
+    try:
+        return curses.tigetstr("dim") is not None
+    except curses.error:
+        return False
+
+
 def build_field(width, height, glyphs, speed, warm_start, previous=None):
     """Grow or shrink the field, keeping the drops that already exist.
 
@@ -334,6 +375,7 @@ def run(stdscr, glyphs, speed, color):
     # With one colour for both, a bold body tier is indistinguishable from the
     # head, so mono (and any colourless terminal) drops that tier.
     bold_body = has_color and head_fg != body_fg
+    dim = has_dim()
 
     height, width = stdscr.getmaxyx()
     field = build_field(width, height, glyphs, speed, warm_start=True)
@@ -366,7 +408,7 @@ def run(stdscr, glyphs, speed, color):
                 break
             if drop.advance(height):
                 drop.reset(height, speed)
-            drop.draw(stdscr, x, height, width, bold_body)
+            drop.draw(stdscr, x, height, width, bold_body, dim)
         stdscr.refresh()
 
         next_frame += frame
