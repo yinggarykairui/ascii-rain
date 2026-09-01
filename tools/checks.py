@@ -10,10 +10,13 @@ terminfo capabilities and byte streams:
     python3 tools/checks.py dumb       # the TERM=dumb refusal
     python3 tools/checks.py args       # argument handling, including `--`
     python3 tools/checks.py tiers      # the no-`dim` tail
+    python3 tools/checks.py --help     # this text
 
-Exit status is 0 if every check in the named groups passed, 1 otherwise. Only
-the `tiers` group needs a dependency (`pip install pyte`); the other three run
-on the standard library alone.
+Exit status is 0 if every check in the named groups passed, 1 otherwise, and 2
+for a word that is not a group. Only the `tiers` group needs a dependency
+(`pip install pyte`); the other three run on the standard library alone, and
+`tiers` is the slow one — it averages lit-cell counts over several runs on a
+480x120 grid because the thing it measures is a percentage.
 
 The child always runs with RLIMIT_CORE at 0. SIGQUIT's default action is to
 dump core, and this checker sends SIGQUIT on purpose.
@@ -82,7 +85,13 @@ def spawn(args=(), term="xterm-256color", cols=COLS, rows=ROWS, pipe_stderr=Fals
         err_read, err_write = os.pipe()
     env = dict(os.environ)
     env["TERM"] = term
-    env.update(env_extra or {})
+    for name, value in (env_extra or {}).items():
+        # A None value means "unset this", which env_extra could not otherwise
+        # express — and an unset TERM is one of the states being checked.
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
     pid = os.fork()
     if pid == 0:  # child
         try:
@@ -155,6 +164,41 @@ def run_until(pid, master, finish, settle=1.2):
     return status, data
 
 
+def wait_within(pid, seconds, drain=None):
+    """Reap `pid` if it ends inside `seconds`. Returns (status or None, waited).
+
+    None means it outlasted the deadline and was SIGKILLed — which is itself
+    the finding, so it is reported rather than raised. `drain` is the pty
+    master to keep emptying meanwhile: a full pty buffer blocks the child's
+    next write, which would look exactly like the hang being measured.
+    """
+    started = time.time()
+    while time.time() - started < seconds:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done == pid:
+            return status, time.time() - started
+        if drain is not None:
+            ready, _, _ = select.select([drain], [], [], 0.02)
+            if ready:
+                try:
+                    os.read(drain, 65536)
+                except OSError:
+                    pass
+        else:
+            time.sleep(0.02)
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    return None, time.time() - started
+
+
+def describe_status(status):
+    if status is None:
+        return "outlasted the deadline, SIGKILLed"
+    if os.WIFSIGNALED(status):
+        return "killed by signal %d" % os.WTERMSIG(status)
+    return "exited %d" % os.WEXITSTATUS(status)
+
+
 def group_signals():
     term = "xterm-256color"
     rmcup, rmkx = restore_suffix(term)
@@ -187,6 +231,35 @@ def group_signals():
     check("signals: a keypress restores the terminal", restored(data),
           repr(data[-24:]))
 
+    # COLUMNS and LINES that no window could have. ncurses believes them over
+    # the terminal's ioctl, and 9999x9999 used to hang initscr() before the
+    # program owned a single exit path: 30 seconds, one byte of output, a
+    # keypress ignored, SIGINT and SIGTERM ignored, SIGKILL the only way out
+    # and the terminal left in raw mode. Both variables are exported routinely
+    # by scripts and CI, so this is the ordinary case, not an exotic one.
+    absurd = {"COLUMNS": "9999", "LINES": "9999"}
+    pid, master, _ = spawn(term=term, env_extra=absurd)
+    drawn = read_for(master, 1.5)
+    check("signals: COLUMNS=9999 LINES=9999 still draws", len(drawn) > 5120,
+          "%d bytes in 1.5 s" % len(drawn))
+    os.write(master, b"q")
+    status, waited = wait_within(pid, 1.0, drain=master)
+    os.close(master)
+    check("signals: COLUMNS=9999 LINES=9999 exits on a keypress within a second",
+          status is not None and os.WIFEXITED(status)
+          and os.WEXITSTATUS(status) == 0,
+          "%.2f s, %s" % (waited, describe_status(status)))
+
+    pid, master, _ = spawn(term=term, env_extra=absurd)
+    read_for(master, 1.0)
+    os.kill(pid, signal.SIGTERM)
+    status, waited = wait_within(pid, 2.0, drain=master)
+    os.close(master)
+    check("signals: COLUMNS=9999 LINES=9999 dies on SIGTERM",
+          status is not None and os.WIFSIGNALED(status)
+          and os.WTERMSIG(status) == signal.SIGTERM,
+          "%.2f s, %s" % (waited, describe_status(status)))
+
 
 # --------------------------------------------------------------------------
 # group: dumb
@@ -209,6 +282,25 @@ def group_dumb():
           bool(lines) and "dumb" in lines[0], repr(lines[:1]))
     check("dumb: writes nothing to stdout", out == b"", repr(out[:60]))
     check("dumb: emits no escape sequence", b"\x1b" not in out, repr(out[:60]))
+
+    # An unset TERM and an empty one were both reported as `TERM=(unset)`, and
+    # both blamed the terminfo database for a variable nobody set.
+    for label, env_extra, wanted in (
+            ("unset", {"TERM": None}, "TERM is not set"),
+            ("empty", {"TERM": ""}, "TERM is set but empty")):
+        pid, master, err = spawn(term="xterm-256color", pipe_stderr=True,
+                                 env_extra=env_extra)
+        out = read_for(master, 2.0, stop_when_idle=True)
+        message = os.read(err, 65536).decode("utf-8", "replace")
+        _, status = os.waitpid(pid, 0)
+        os.close(master)
+        os.close(err)
+        lines = [line for line in message.splitlines() if line]
+        check("dumb: TERM %s exits 2 and says so" % label,
+              os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2
+              and len(lines) == 1 and wanted in lines[0]
+              and "terminfo database" not in lines[0] and out == b"",
+              "exit %s: %s" % (status, message.strip()[:80]))
 
     pid, master, _ = spawn(term="vt100")
     drawn = read_for(master, 2.0)
@@ -255,6 +347,41 @@ def group_args():
           code == 2 and "expected one argument" in err,
           "exit %d: %s" % (code, err.strip()[:70]))
 
+    # argparse accepts unambiguous prefixes, so every accepted spelling of a
+    # flag has to behave the same. `--sp -- 2` used to eat the -- and report
+    # `unexpected argument: '2'`.
+    for args in (["--sp", "--", "2"], ["--cha", "--", "ascii"]):
+        code, _, err = cli(args)
+        check("args: %s is a missing value, like the long spelling"
+              % " ".join(args),
+              code == 2 and "expected one argument" in err,
+              "exit %d: %s" % (code, err.strip()[:70]))
+
+    # One wording for one mistake: a word the program has no use for, however
+    # it arrived. argparse's own plural ("unrecognized arguments: a") was the
+    # second voice.
+    for args in (["a"], ["--", "a"], ["--nonsense"]):
+        code, _, err = cli(args)
+        check("args: %s is one 'unexpected argument' line" % " ".join(args),
+              code == 2 and "unexpected argument" in err
+              and len([line for line in err.splitlines() if line]) == 1,
+              "exit %d: %s" % (code, err.strip()[:70]))
+
+    # --help and --version used to fire the instant argparse reached them and
+    # exit 0 over the top of the mistake standing next to them.
+    for args in (["--version", "--bogus"], ["--help", "--bogus"]):
+        code, out, err = cli(args)
+        check("args: %s exits 2 naming the mistake" % " ".join(args),
+              code == 2 and "--bogus" in err and out == "",
+              "exit %d: %s" % (code, err.strip()[:70]))
+
+    # A number quoted back has to be the one that was typed. `--speed 2_0`
+    # reported "got 20", which is what float() made of it.
+    code, _, err = cli(["--speed", "2_0"])
+    check("args: --speed 2_0 is quoted as typed",
+          code == 2 and "2_0" in err and "got 20" not in err,
+          "exit %d: %s" % (code, err.strip()[:70]))
+
     # The day-019 refusals. The `--` change rewrites the argv every one of
     # these travels through, so they are re-run as a regression sweep.
     refusals = [
@@ -263,7 +390,7 @@ def group_args():
         (["--charset", "nope"], "--charset"),
         (["--color", "nope"], "--color"),
         (["--charset", "custom:   "], "custom"),
-        (["--nonsense"], "unrecognized"),
+        (["--nonsense"], "unexpected argument"),
     ]
     for args, wanted in refusals:
         code, out, err = cli(args)
@@ -284,15 +411,23 @@ def group_args():
 
 
 # How many runs each density figure averages. Every column picks its own length
-# and phase, so a single settled grid varies by 5-12 % run to run; three runs
-# sat close enough to the 10 % threshold below to fail on an unlucky afternoon.
-DENSITY_RUNS = 6
+# and phase, so a single settled grid varies by 3-5 % run to run on the grid
+# below; eight runs put the standard error of a mean near 1.3 %, which is what
+# makes a 10 % threshold an assertion rather than a coin toss. The effect being
+# asserted measures 14-17 % on this instrument, so the margin is about two
+# standard errors — the reason the grid is this wide and the count this high.
+DENSITY_RUNS = 8
 
 # The density figures are counted on a grid this wide rather than the 100x30 of
 # the other groups. Each column contributes its own random length and phase, so
 # the noise in a lit-cell count falls with the number of columns on screen —
-# 240 of them costs the same wall clock as 100 and halves the spread.
-DENSITY_COLS, DENSITY_ROWS = 240, 60
+# 480 of them costs a few seconds a run and cuts the spread from 5-12 % to
+# 3-5 %.
+DENSITY_COLS, DENSITY_ROWS = 480, 120
+
+# Long enough for the settled grid to be the one being counted; the field warm
+# starts, so it is settled from the first frame and this is drain time.
+DENSITY_SECONDS = 1.5
 
 
 def lit_cells(data, cols, rows):
@@ -341,7 +476,8 @@ def settled_capture(term, program=PROGRAM, seconds=3.0, cols=COLS, rows=ROWS):
 def mean_lit(term, program=PROGRAM, runs=DENSITY_RUNS):
     counts = [
         lit_cells(
-            settled_capture(term, program, cols=DENSITY_COLS, rows=DENSITY_ROWS),
+            settled_capture(term, program, seconds=DENSITY_SECONDS,
+                            cols=DENSITY_COLS, rows=DENSITY_ROWS),
             DENSITY_COLS, DENSITY_ROWS,
         )
         for _ in range(runs)
@@ -371,6 +507,35 @@ def has_dim_sgr(data):
     return b"\x1b[2m" in data or b";2m" in data
 
 
+# ncurses keeps the first terminfo entry it is handed for the life of the
+# process, so asking about a second TERM in-process answers about the first.
+# One child per terminal is the only honest way to read this.
+TERMINFO_PROBE = (
+    "import curses;curses.setupterm();"
+    "print(curses.tigetstr('dim') is not None, curses.tigetnum('ncv'))"
+)
+
+
+def branch_of(term):
+    """Which tail branch `term` takes, and the terminfo reason, as a sentence.
+
+    ascii_rain.has_dim() asks terminfo two questions: is there a `dim` string,
+    and does `ncv` (no_color_video) mask dim while a colour pair is in use.
+    This mirrors that so the printed reasoning names the reason rather than the
+    conclusion.
+    """
+    env = dict(os.environ)
+    env["TERM"] = term
+    out = subprocess.check_output([sys.executable, "-c", TERMINFO_PROBE], env=env)
+    has_string, ncv = out.decode().split()
+    ncv = int(ncv)
+    if has_string != "True":
+        return "density", "no dim string"
+    if ncv > 0 and ncv & 16:
+        return "density", "dim string, but ncv#%d masks dim under colour" % ncv
+    return "dim", "dim string, ncv#%d does not mask it" % ncv
+
+
 def group_tiers():
     try:
         import pyte  # noqa: F401
@@ -378,68 +543,147 @@ def group_tiers():
         check("tiers: pyte is installed", False, "pip install pyte")
         return
 
-    # Two notes on which terminals appear below, both measured rather than
-    # assumed.
+    # Which terminal stands for which branch, and why. Every number below is
+    # read off one of these three, so the mapping is asserted rather than
+    # assumed — a terminfo change on the machine running this would otherwise
+    # silently move a terminal between branches and leave the checks passing.
     #
-    # The dim-capable reference is xterm-256color, not TERM=linux. `linux` does
-    # have a `dim` string in terminfo — so ascii-rain takes the dim path there,
-    # correctly — but its `ncv#18` tells ncurses that dim cannot be combined
-    # with colour, and ncurses drops the attribute: the bytes carry no dim SGR
-    # at all. That is a terminfo fact about the Linux console, not a decision
-    # this program makes.
-    #
-    # And the thinning is measured against the day-019 binary on the *same*
-    # terminal rather than against another terminal on the same binary.
-    # Counting lit cells off a settled grid carries a per-terminal offset —
-    # day-019, whose tail is identical everywhere, still counts differently at
-    # TERM=linux than at TERM=vt100 — so a cross-terminal difference mixes the
-    # effect with that offset. Same terminal, two binaries, back to back: the
-    # offset cancels and what is left is the tail.
+    # NOTE: done-checklist item 4 (day 038) names TERM=linux as the *dim*
+    # reference — "the TERM=linux capture still contains the dim SGR". That
+    # wording is superseded. `linux` has a dim string and also ncv#18, which
+    # tells ncurses dim cannot be combined with colour; ascii-rain always has a
+    # colour pair in use there, so ncurses dropped A_DIM and the tail rendered
+    # byte-identical to the body. has_dim() is ncv-aware now and `linux` takes
+    # the density branch. The item's 10 % is asserted below against
+    # xterm-256color, which really does emit dim, and against the day-019
+    # binary on each density terminal, which is the same comparison without a
+    # per-terminal offset in it.
+    branches = {}
+    for term, wanted in (("xterm-256color", "dim"), ("linux", "density"),
+                         ("vt100", "density")):
+        branch, why = branch_of(term)
+        branches[term] = branch
+        check("tiers: TERM=%s is the %s branch" % (term, wanted),
+              branch == wanted, "terminfo says: %s" % why)
+
     dim_capture = settled_capture("xterm-256color")
-    check("tiers: a dim-capable terminal still emits the dim SGR",
+    check("tiers: the dim terminal emits the dim SGR",
           has_dim_sgr(dim_capture), "TERM=xterm-256color")
+    for term in ("vt100", "linux"):
+        check("tiers: no dim SGR at TERM=%s" % term,
+              not has_dim_sgr(settled_capture(term)))
 
-    flat_capture = settled_capture("vt100")
-    check("tiers: no dim SGR at TERM=vt100", not has_dim_sgr(flat_capture))
+    now = {}
+    for term in ("xterm-256color", "vt100", "linux"):
+        now[term] = mean_lit(term)
+        note("tiers: TERM=%-14s draws %.0f lit cells %s"
+             % (term, now[term][0], now[term][1]))
 
-    thin, thin_counts = mean_lit("vt100")
-    full, full_counts = mean_lit("linux", runs=3)
-    note("tiers: for reference, TERM=linux draws %.0f %s" % (full, full_counts))
+    # Item 4's 10 %, first form: against the terminal that really does emit
+    # dim. Cross-terminal, so it carries a per-terminal rendering offset and
+    # measures the effect a couple of points smaller than it is; it is asserted
+    # anyway because it is the comparison the checklist item asks for.
+    dim_mean = now["xterm-256color"][0]
+    for term in ("vt100", "linux"):
+        thin = now[term][0]
+        drop = 1.0 - (thin / dim_mean) if dim_mean else 0.0
+        check("tiers: TERM=%s draws at least 10%% fewer cells than the dim "
+              "terminal" % term, drop >= 0.10,
+              "xterm-256color %.0f -> %s %.0f, %.1f%% fewer"
+              % (dim_mean, term, thin, drop * 100))
 
     baseline = day019_program()
     if baseline is None:
-        note("tiers: day-019 blob %s is not in this clone, so the two "
-             "comparisons below fall back to TERM=linux on this build, which "
-             "is noisier" % DAY019_SHA[:7])
-        old_thin, old_thin_counts = full, full_counts
-        old_full, old_full_counts = full, full_counts
+        note("tiers: day-019 blob %s is not in this clone, so the three "
+             "same-terminal comparisons below are skipped rather than being "
+             "quietly turned into something weaker" % DAY019_SHA[:7])
+        check("tiers: the day-019 baseline is available", False,
+              "git show %s:ascii_rain.py failed" % DAY019_SHA[:7])
+        old = None
     else:
         try:
-            old_thin, old_thin_counts = mean_lit("vt100", program=baseline)
-            old_full, old_full_counts = mean_lit("linux", program=baseline, runs=3)
+            old = dict((term, mean_lit(term, program=baseline))
+                       for term in ("xterm-256color", "vt100", "linux"))
         finally:
             os.unlink(baseline)
 
-    drop = 1.0 - (thin / old_thin) if old_thin else 0.0
-    # Threshold 5 %, not the 10 % the field model is held to below, and the gap
-    # between those two numbers is a property of the measurement rather than of
-    # the program. Replaying a capture through pyte recovers about 13 % of the
-    # 18.7 % the model draws: a settled grid is one frame, and a frame read off
-    # a terminal emulator carries cells the emulator kept that ncurses had
-    # already blanked. 13 % is not far enough above 10 % to assert at any
-    # sample size this check can afford, so the pty half asserts the direction
-    # and the size it can stand behind, and the exact figure is asserted where
-    # it is exact.
-    check("tiers: the no-dim tail draws measurably fewer cells", drop >= 0.05,
-          "at TERM=vt100: day 019 %s -> %.0f, now %s -> %.0f, %.1f%% fewer"
-          % (old_thin_counts, old_thin, thin_counts, thin, drop * 100))
+    if old is not None:
+        # Item 4's 10 %, second form, and the one with the margin: day 019 drew
+        # every in-trail cell on every terminal, which is exactly the cell set
+        # the dim branch still draws. Comparing the two binaries on the *same*
+        # terminal cancels the rendering offset, so what is left is the tail.
+        for term in ("vt100", "linux"):
+            thin, old_mean = now[term][0], old[term][0]
+            drop = 1.0 - (thin / old_mean) if old_mean else 0.0
+            check("tiers: TERM=%s draws at least 10%% fewer cells than day 019"
+                  % term, drop >= 0.10,
+                  "day 019 %s -> %.0f, now %s -> %.0f, %.1f%% fewer"
+                  % (old[term][1], old_mean, now[term][1], thin, drop * 100))
 
-    off = abs(full - old_full) / old_full if old_full else 1.0
-    check("tiers: the dim path is unchanged from day 019", off <= 0.20,
-          "at TERM=linux: day 019 %s -> %.0f, now %.0f, %.1f%% apart"
-          % (old_full_counts, old_full, full, off * 100))
+        # The dim path is unchanged. Tolerance 10 %, which is strictly below
+        # the ~20 % the thinning measures on this same instrument — the old
+        # +/-20 % could not fail the way it existed to fail — and about five
+        # standard errors above the noise in a six-run mean.
+        dim_old = old["xterm-256color"][0]
+        off = abs(dim_mean - dim_old) / dim_old if dim_old else 1.0
+        check("tiers: the dim path is unchanged from day 019", off <= 0.10,
+              "at TERM=xterm-256color: day 019 %s -> %.0f, now %.0f, %.1f%% apart"
+              % (old["xterm-256color"][1], dim_old, dim_mean, off * 100))
 
     model_tiers()
+    model_dim_path_ignores_survival()
+    model_tail_never_returns()
+
+
+class Recorder:
+    """A stand-in for the curses window that records writes instead of drawing.
+
+    `Drop.draw` only ever calls addstr/insstr through `_put`, so this is enough
+    to read the draw path's decisions straight off the real code — no terminal,
+    no emulator, nothing between the claim and the answer.
+    """
+
+    def __init__(self):
+        self.cells = []
+
+    def addstr(self, y, x, glyph, attr):
+        self.cells.append((y, x, glyph, attr))
+
+    insstr = addstr
+
+
+def seeded_field(rain, height, width, seed):
+    import random
+
+    random.seed(seed)
+    return [rain.Drop(height, rain.CHARSETS["matrix"], 1.0, True)
+            for _ in range(width)]
+
+
+def load_rain():
+    sys.path.insert(0, ROOT)
+    import ascii_rain
+
+    return ascii_rain
+
+
+def stub_color_pairs():
+    """Let Drop.draw run with no terminal under it. Returns the undo.
+
+    `curses.color_pair` refuses to answer before initscr(), and the model
+    checks below have no screen at all. Which cells get written is all they
+    read, and that does not depend on the attribute value, so color_pair
+    becomes arithmetic for the duration.
+    """
+    import curses
+
+    real = curses.color_pair
+    curses.color_pair = lambda pair: pair << 8
+
+    def undo():
+        curses.color_pair = real
+
+    return undo
 
 
 def model_tiers():
@@ -451,16 +695,11 @@ def model_tiers():
     `Drop.draw` uses, read off the same objects, so there is nothing between
     the claim and the number.
     """
-    sys.path.insert(0, ROOT)
-    import random
-
-    import ascii_rain
+    rain = load_rain()
 
     # Seeded, so this number is the same on every machine and every run.
-    random.seed(20260901)
     height, width = 60, 240
-    field = [ascii_rain.Drop(height, ascii_rain.CHARSETS["matrix"], 1.0, True)
-             for _ in range(width)]
+    field = seeded_field(rain, height, width, 20260901)
     with_dim = thinned = 0
     for frame in range(700):
         for drop in field:
@@ -483,6 +722,86 @@ def model_tiers():
           drop_fraction >= 0.10,
           "dim path %d cells, thinned %d, %.1f%% fewer"
           % (with_dim, thinned, drop_fraction * 100))
+
+
+def model_dim_path_ignores_survival():
+    """The dim path is unchanged from day 019, asserted structurally.
+
+    Day 019 had no survival flag, so "unchanged" means the draw path must not
+    consult one while dim is in use. Rather than measure that, force every
+    cell's flag to True and then to False and compare what `Drop.draw` writes:
+    identical under dim, different without it. A number can drift; this cannot.
+    """
+    rain = load_rain()
+    undo = stub_color_pairs()
+    height, width = 40, 60
+    for dim, want_same in ((True, True), (False, False)):
+        drawn = []
+        for flag in (True, False):
+            field = seeded_field(rain, height, width, 20260902)
+            for _ in range(120):
+                for drop in field:
+                    if drop.advance(height):
+                        drop.reset(height, 1.0)
+            for drop in field:
+                drop.cells = dict((row, (glyph, flag))
+                                  for row, (glyph, _) in drop.cells.items())
+            window = Recorder()
+            for x, drop in enumerate(field):
+                drop.draw(window, x, height, width, True, dim)
+            drawn.append(window.cells)
+        same = drawn[0] == drawn[1]
+        check("tiers: the draw path %s the survival flag when dim is %s"
+              % ("ignores" if want_same else "uses", "in use" if dim else "off"),
+              same == want_same,
+              "%d cells either way" % len(drawn[0]) if same
+              else "%d vs %d cells" % (len(drawn[0]), len(drawn[1])))
+    undo()
+
+
+def model_tail_never_returns():
+    """Decided once, so the trail dissolves rather than strobes.
+
+    The per-cell coin flip is taken when the cell is born and never re-taken;
+    a per-frame re-roll would score identically on every density figure above
+    and look completely different on screen. The observable difference is this:
+    a cell that has once been held back must stay held back for the rest of
+    that drop's life. Churn swaps a cell's glyph, so the cell is followed by
+    row and by life, not by what it is showing.
+    """
+    rain = load_rain()
+    undo = stub_color_pairs()
+    height, width = 40, 80
+    field = seeded_field(rain, height, width, 20260903)
+    lives = [0] * width
+    held_back = set()
+    offences = []
+    for _ in range(400):
+        for index, drop in enumerate(field):
+            if drop.advance(height):
+                drop.reset(height, 1.0)
+                lives[index] += 1
+        for index, drop in enumerate(field):
+            window = Recorder()
+            drop.draw(window, index, height, width, True, False)
+            shown = set(y for y, _, _, _ in window.cells)
+            head_row = int(drop.head)
+            for row in drop.cells:
+                distance = head_row - row
+                if distance < 0 or distance >= drop.length:
+                    continue
+                key = (index, lives[index], row)
+                if row in shown:
+                    if key in held_back:
+                        offences.append(key)
+                else:
+                    held_back.add(key)
+    undo()
+    check("tiers: a tail cell, once held back, is never drawn again",
+          not offences,
+          "%d cell(s) held back and then drawn, e.g. %s"
+          % (len(offences), offences[:3]) if offences
+          else "%d cells held back across the run" % len(held_back))
 
 
 # --------------------------------------------------------------------------
