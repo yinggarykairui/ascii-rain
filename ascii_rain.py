@@ -801,13 +801,20 @@ def _main(argv=None):
     # the line above ("unexpected argument: 'a'") — two voices for a word the
     # program has no use for. The scout finds it either way, and finds it
     # *before* --help or --version can exit 0 over the top of it.
-    _, extra = build_parser(scout=True).parse_known_args(argv)
+    scout, extra = build_parser(scout=True).parse_known_args(argv)
     if extra:
-        parser.error("unexpected argument: %r" % extra[0])
+        parser.error("unexpected argument: %s" % show(extra[0]))
+    # Values are checked off the scout's reading too, for the same reason a
+    # stray word is. `--speed 99 --help` printed the help and exited 0 with the
+    # bad speed unread, while `--bogus --help` exited 2: one sentence in the
+    # README, two behaviours in the program. A mistake standing next to --help
+    # is a mistake either way it is spelled.
+    speed = parse_speed(scout.speed, parser)
+    glyphs = parse_charset(scout.charset, parser)
+    color = parse_color(scout.color, parser)
+    # Nothing left to refuse, so the real parser can run — which is where
+    # --help and --version print and exit 0.
     args = parser.parse_args(argv)
-    speed = parse_speed(args.speed, parser)
-    glyphs = parse_charset(args.charset, parser)
-    color = parse_color(args.color, parser)
     glyphs = representable(
         glyphs, terminal_encoding(), parser,
         args.charset if args.charset in CHARSETS else "custom pool",
