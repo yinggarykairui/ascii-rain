@@ -55,100 +55,57 @@ input it did not expect.
 
 ## Details
 
-**Getting out.** Every key exits, including the ones a terminal usually eats.
-The tty runs in raw mode, so Ctrl-S and Ctrl-Q reach the program rather than
-freezing it — and so do `Ctrl-C` and `Ctrl-\`, which arrive as ordinary bytes
-rather than as signals and exit the way every other key does. `SIGINT`,
-`SIGQUIT`, `SIGHUP` and `SIGTERM` *sent from elsewhere* — `kill`, a supervisor,
-a terminal closing — are caught instead, and put the terminal back the way they
-found it even when two arrive at once. `SIGKILL` cannot be caught by anything,
-so that one is on you. Whatever was still in the input buffer is flushed on the
-way out, so a paste that happens to start with a key does not end up running in
-your shell.
+**Getting out.** Every key exits. The tty runs in raw mode, so even Ctrl-S,
+Ctrl-Q, `Ctrl-C` and `Ctrl-\` reach it as ordinary bytes. `SIGINT`, `SIGQUIT`,
+`SIGHUP` and `SIGTERM` *sent from elsewhere* are caught instead and put the
+terminal back as they found it; `SIGKILL` cannot be caught by anything. The
+input buffer is flushed on the way out, so a paste does not land in your shell.
 
-**Exit status.** A keypress exit is `0`, and that is the only thing `0` means.
-`Ctrl-C` and `Ctrl-\` typed at the keyboard are keypresses here, not signals,
-so they exit `0` as well. The statuses a shell reports for those two belong to
-the signals themselves, which reach this program only when something else sends
-them: a signal is re-raised with its default handler once the terminal is back,
-so a shell or a supervisor sees the process killed by it — `130` for `SIGINT`,
-`143` for `SIGTERM`, `129` for `SIGHUP`, and `131` for `SIGQUIT`, which keeps
-its default disposition and will write a core file on a system that has them
-enabled. Bad input, and a terminal that cannot be drawn on, are `2`. A signal
-landing before the interpreter has finished starting never reaches this
-program, so its status is CPython's and nothing here is broken; send `SIGTERM`
-or `SIGKILL` for certainty at startup.
+**Exit status.** A keypress exit is `0`, the only thing `0` means — `Ctrl-C`
+and `Ctrl-\` at the keyboard are keypresses, not signals. A signal from
+elsewhere is re-raised with its default handler once the terminal is back, so a
+shell sees the process killed by it: `130`, `143`, `129`, `131` for `SIGINT`,
+`SIGTERM`, `SIGHUP`, `SIGQUIT`, which still dumps core where that is enabled.
+Bad input, and a terminal that cannot be drawn on, are `2`. A signal landing
+before the interpreter has finished starting never reaches this program, so its
+status is CPython's and nothing here is broken; send `SIGTERM` or `SIGKILL` for
+certainty at startup.
 
-**Terminals.** A terminal with no colour renders in your default foreground
-instead of failing, and so does one that cannot hide its cursor — `vt100`,
-`ansi` and `xterm-mono` all run. Those three have no `dim` attribute at all, and
-the Linux console has one its terminfo entry forbids combining with colour
-(`ncv#18`), which comes to the same thing. On all four the tail takes its step
-down from density instead of brightness: about half the cells of the trailing
-section are not drawn, and the trail still steps down twice. Each cell decides
-once whether it survives that far, so the tail dissolves rather than flickers. A
-terminal with no cursor addressing at all — `TERM=dumb` — cannot be animated by
-anything, so the program says so in one line and exits `2` without writing to
-the screen. An unset `TERM` and an empty one each get their own line.
+**Terminals.** No colour, or no hideable cursor, loses that and keeps the
+program: `vt100`, `ansi`, `xterm-mono` and the Linux console all run. None of
+those four can dim in colour, so their tail steps down in density instead —
+about half its cells go undrawn. `TERM=dumb` has no cursor addressing at all
+and cannot be animated: one line, exit `2`, nothing written to the screen. An
+unset, empty or unknown `TERM` gets its own line. `COLUMNS` and `LINES` above
+the real size are ignored.
 
-**Window size.** The size comes from the terminal. ncurses reads `COLUMNS` and
-`LINES` ahead of it, so a value bigger than the real window is dropped here —
-`COLUMNS=9999 LINES=9999`, which scripts and CI export routinely, otherwise
-hangs the program before it owns an exit path. A smaller value is kept, since
-drawing into part of a window is a thing people ask for. The field is also
-capped at 1000 columns by 400 rows, which is past what any terminal window
-reaches.
-
-**Encoding.** Under a non-UTF-8 locale — `LC_ALL=C`, which is what cron and some
-CI runners hand you — glyphs that cannot be encoded are dropped, with a line on
-stderr saying how many. If nothing is left, it says so and exits `2` rather than
-drawing a blank screen.
-
-**Glyph pools.** A `custom:` pool is filtered to printable, non-blank and
-not double-width, since a double-width glyph shears the column grid and a pool of
-spaces draws nothing at all. Three of the four `blocks` glyphs are
-"ambiguous-width" and will render double on terminals configured to treat them
-that way; the other named charsets are single-width throughout. A `custom:` pool
-accepts ambiguous-width characters too — Cyrillic, Greek, `①`, the box-drawing
-set — and they will shear the field on a CJK-configured terminal for the same
-reason. They are allowed because the filter that would reject `①` rejects
-Cyrillic and Greek with it, which is the worse trade; this paragraph is the
-warning. Emoji are not part of that trade and are rejected as double-width, even
-the ones Unicode's width table calls neutral, and so is a lone variation
-selector such as U+FE0F, which would draw as an invisible cell.
+**Glyph pools.** A `custom:` pool takes printable, non-blank, single-width
+characters, and says how many it dropped when some do not qualify. Emoji go,
+and so does a lone variation selector such as U+FE0F. Ambiguous-width
+characters stay — Cyrillic, Greek, `①`, box-drawing, three of the four `blocks`
+glyphs — and render double, shearing the field, on a terminal configured that
+way. Under a non-UTF-8 locale (`LC_ALL=C`) unencodable glyphs go the same way;
+if none are left it exits `2`.
 
 **Arguments.** `--` is the end-of-options marker and is consumed like one:
-`python3 ascii_rain.py --speed 2 --` runs. The program takes no positional
-arguments, so anything after `--` is an error naming the offending word — the
-same one line, in the same wording, for a stray word anywhere on the command
-line. Unambiguous abbreviations work (`--sp 2` is `--speed 2`) and behave
-exactly like the spelling they stand for. `--help` and `--version` print and
-exit `0`, but not over the top of a mistake standing next to them.
+`python3 ascii_rain.py --speed 2 --` runs. There are no positional arguments,
+so a word after `--` is an error naming it, worded as any stray word is.
+Unambiguous abbreviations work (`--sp 2` is `--speed 2`). `--help` and
+`--version` print and exit `0`, but not over the top of a mistake beside them,
+bad flag or bad value alike.
 
-**Requirements.** Python 3.8 or newer, and a terminal on both stdin and stdout —
-redirect either and it says so and exits `2`, rather than drawing to a file or
-running with no way out. On Python 3.8 Escape takes ncurses' default second to
-register, because `curses.set_escdelay` arrived in 3.9; on 3.9 and newer it exits
-in about 60 ms like every other key.
+**Requirements.** Python 3.8 or newer, and a terminal on both stdin and stdout:
+redirect either and it says so and exits `2`. On 3.8 Escape takes ncurses'
+default second to register; on 3.9 and newer, about 60 ms like any other key.
+`curses` ships with CPython on Linux and macOS but **not** on Windows, which
+would need a third-party build.
 
-`curses` ships with CPython on Linux and macOS but **not** on Windows — there it
-will not run without a third-party curses build, and adding one would mean a
-dependency this project does not want.
-
-**Development tools.** Two scripts under `tools/`, neither of them part of the
-program. `tools/screenshot.py` regenerates `screenshot.png` from a real run and
-wants `pip install pyte pillow`. `tools/checks.py` drives the program under a
-pseudo-terminal and checks the things a person cannot check by looking — exit
-status per signal, the `TERM=dumb` refusal, argument handling, and the
-no-`dim` tail; it wants `pyte` for the last of those and runs the rest without
-it. Both scripts take `--help`.
-
-The screenshot tool needs a monospace font in regular and bold and a CJK font
-for the half-width katakana. It looks in the usual Linux and macOS locations;
-`python3 tools/screenshot.py --check-fonts` prints what it resolved, and
-`ASCII_RAIN_FONT_MONO`, `ASCII_RAIN_FONT_MONO_BOLD` and `ASCII_RAIN_FONT_CJK`
-override any of the three. If a font is missing it names the one it could not
-find and exits `2`.
+**Development tools.** Two scripts under `tools/`, neither part of the program;
+`--help` covers both. `tools/screenshot.py` repaints `screenshot.png` from a
+real run and wants `pip install pyte pillow` plus three system fonts.
+`tools/checks.py` drives the program under a pseudo-terminal and asserts what a
+person cannot check by looking: signals, `TERM=dumb`, arguments, the thinned
+tail.
 
 Assets: `screenshot.png` is painted by `tools/screenshot.py` from the program's
 own output; the glyph outlines in it come from DejaVu Sans Mono and DejaVu Sans
