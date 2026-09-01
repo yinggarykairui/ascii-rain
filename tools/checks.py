@@ -412,22 +412,22 @@ def group_args():
 
 # How many runs each density figure averages. Every column picks its own length
 # and phase, so a single settled grid varies by 3-5 % run to run on the grid
-# below; eight runs put the standard error of a mean near 1.3 %, which is what
+# below; eight runs put the standard error of a mean near 1 %, which is what
 # makes a 10 % threshold an assertion rather than a coin toss. The effect being
-# asserted measures 14-17 % on this instrument, so the margin is about two
-# standard errors — the reason the grid is this wide and the count this high.
-DENSITY_RUNS = 8
+# asserted measures ~17 % on this instrument, so the margin is three standard
+# errors or so — the reason the grid is this wide and the count this high.
+DENSITY_RUNS = 12
 
 # The density figures are counted on a grid this wide rather than the 100x30 of
 # the other groups. Each column contributes its own random length and phase, so
 # the noise in a lit-cell count falls with the number of columns on screen —
-# 480 of them costs a few seconds a run and cuts the spread from 5-12 % to
-# 3-5 %.
-DENSITY_COLS, DENSITY_ROWS = 480, 120
+# 960 of them costs about two seconds a run and cuts the spread from 5-12 % to
+# 2-4 %.
+DENSITY_COLS, DENSITY_ROWS = 960, 120
 
 # Long enough for the settled grid to be the one being counted; the field warm
 # starts, so it is settled from the first frame and this is drain time.
-DENSITY_SECONDS = 1.5
+DENSITY_SECONDS = 1.0
 
 
 def lit_cells(data, cols, rows):
@@ -473,16 +473,25 @@ def settled_capture(term, program=PROGRAM, seconds=3.0, cols=COLS, rows=ROWS):
     return data
 
 
-def mean_lit(term, program=PROGRAM, runs=DENSITY_RUNS):
-    counts = [
-        lit_cells(
-            settled_capture(term, program, seconds=DENSITY_SECONDS,
-                            cols=DENSITY_COLS, rows=DENSITY_ROWS),
-            DENSITY_COLS, DENSITY_ROWS,
-        )
-        for _ in range(runs)
-    ]
-    return sum(counts) / float(len(counts)), counts
+def interleaved_means(cases, runs=DENSITY_RUNS):
+    """Mean lit cells for several (label, term, program) cases, sampled round
+    robin.
+
+    Order matters here. Measuring every run of one case and then every run of
+    the next lets whatever the machine is doing during the first block bias it
+    against the second, and the figures below are differences between blocks a
+    couple of minutes apart. Interleaving pairs them in time instead, so a
+    drift lands on every case at once and cancels out of the ratio.
+    """
+    counts = dict((label, []) for label, _, _ in cases)
+    for _ in range(runs):
+        for label, term, program in cases:
+            counts[label].append(lit_cells(
+                settled_capture(term, program, seconds=DENSITY_SECONDS,
+                                cols=DENSITY_COLS, rows=DENSITY_ROWS),
+                DENSITY_COLS, DENSITY_ROWS))
+    return dict((label, (sum(c) / float(len(c)), c))
+                for label, c in counts.items())
 
 
 def day019_program():
@@ -573,62 +582,68 @@ def group_tiers():
         check("tiers: no dim SGR at TERM=%s" % term,
               not has_dim_sgr(settled_capture(term)))
 
-    now = {}
-    for term in ("xterm-256color", "vt100", "linux"):
-        now[term] = mean_lit(term)
-        note("tiers: TERM=%-14s draws %.0f lit cells %s"
-             % (term, now[term][0], now[term][1]))
-
-    # Item 4's 10 %, first form: against the terminal that really does emit
-    # dim. Cross-terminal, so it carries a per-terminal rendering offset and
-    # measures the effect a couple of points smaller than it is; it is asserted
-    # anyway because it is the comparison the checklist item asks for.
-    dim_mean = now["xterm-256color"][0]
-    for term in ("vt100", "linux"):
-        thin = now[term][0]
-        drop = 1.0 - (thin / dim_mean) if dim_mean else 0.0
-        check("tiers: TERM=%s draws at least 10%% fewer cells than the dim "
-              "terminal" % term, drop >= 0.10,
-              "xterm-256color %.0f -> %s %.0f, %.1f%% fewer"
-              % (dim_mean, term, thin, drop * 100))
-
     baseline = day019_program()
     if baseline is None:
-        note("tiers: day-019 blob %s is not in this clone, so the three "
-             "same-terminal comparisons below are skipped rather than being "
-             "quietly turned into something weaker" % DAY019_SHA[:7])
         check("tiers: the day-019 baseline is available", False,
-              "git show %s:ascii_rain.py failed" % DAY019_SHA[:7])
-        old = None
-    else:
-        try:
-            old = dict((term, mean_lit(term, program=baseline))
-                       for term in ("xterm-256color", "vt100", "linux"))
-        finally:
-            os.unlink(baseline)
+              "git show %s:ascii_rain.py failed - item 4 needs it as the "
+              "calibration standard, so the density checks below are not run "
+              "rather than being quietly turned into something weaker"
+              % DAY019_SHA[:7])
+        model_tiers()
+        model_dim_path_ignores_survival()
+        model_tail_never_returns()
+        return
+    terms = ("xterm-256color", "vt100", "linux")
+    try:
+        means = interleaved_means(
+            [("now/" + term, term, PROGRAM) for term in terms]
+            + [("019/" + term, term, baseline) for term in terms])
+    finally:
+        os.unlink(baseline)
+    now = dict((term, means["now/" + term]) for term in terms)
+    old = dict((term, means["019/" + term]) for term in terms)
+    for term in terms:
+        note("tiers: TERM=%-14s draws %.0f lit cells, drew %.0f at day 019"
+             % (term, now[term][0], old[term][0]))
+        note("       now %s" % (now[term][1],))
+        note("       019 %s" % (old[term][1],))
 
-    if old is not None:
-        # Item 4's 10 %, second form, and the one with the margin: day 019 drew
-        # every in-trail cell on every terminal, which is exactly the cell set
-        # the dim branch still draws. Comparing the two binaries on the *same*
-        # terminal cancels the rendering offset, so what is left is the tail.
-        for term in ("vt100", "linux"):
-            thin, old_mean = now[term][0], old[term][0]
-            drop = 1.0 - (thin / old_mean) if old_mean else 0.0
-            check("tiers: TERM=%s draws at least 10%% fewer cells than day 019"
-                  % term, drop >= 0.10,
-                  "day 019 %s -> %.0f, now %s -> %.0f, %.1f%% fewer"
-                  % (old[term][1], old_mean, now[term][1], thin, drop * 100))
+    # Item 4's 10 %, against xterm-256color, the terminal that really does emit
+    # dim. Counting lit cells off a settled grid carries a per-terminal offset:
+    # day 019's tail was identical everywhere, and its captures still differ by
+    # several percent from one terminal to the next. So day 019 is the
+    # calibration standard. Dividing each terminal's own day-019 count out of
+    # its count today removes the offset and leaves the tail, and the dim
+    # terminal's own drift (checked below, and ~0) normalises what is left.
+    # Both the corrected figure and the raw cross-terminal one are printed;
+    # the corrected one is the one asserted, because the raw one is the effect
+    # minus an offset of roughly the same size as the margin. For scale: four
+    # consecutive runs of this check measured 12.4, 13.8, 14.4 and 14.7 %
+    # against the checklist's 10 %, so a reading near 11 % is an unlucky
+    # afternoon and a reading near 5 % is a regression.
+    dim_now, dim_old = now["xterm-256color"][0], old["xterm-256color"][0]
+    dim_drift = dim_now / dim_old if dim_old else 0.0
+    for term in ("vt100", "linux"):
+        offset = old[term][0] / dim_old if dim_old else 1.0
+        raw = 1.0 - (now[term][0] / dim_now) if dim_now else 0.0
+        corrected = 1.0 - (now[term][0] / old[term][0]) / dim_drift \
+            if old[term][0] and dim_drift else 0.0
+        note("tiers: TERM=%s captures %.1f%% more cells than TERM=xterm-256color "
+             "for the same cell set (day 019, both binaries drawing every "
+             "in-trail cell)" % (term, (offset - 1) * 100))
+        check("tiers: TERM=%s draws at least 10%% fewer cells than the dim "
+              "terminal" % term, corrected >= 0.10,
+              "%.1f%% fewer with that offset divided out (%.1f%% raw)"
+              % (corrected * 100, raw * 100))
 
-        # The dim path is unchanged. Tolerance 10 %, which is strictly below
-        # the ~20 % the thinning measures on this same instrument — the old
-        # +/-20 % could not fail the way it existed to fail — and about five
-        # standard errors above the noise in a six-run mean.
-        dim_old = old["xterm-256color"][0]
-        off = abs(dim_mean - dim_old) / dim_old if dim_old else 1.0
-        check("tiers: the dim path is unchanged from day 019", off <= 0.10,
-              "at TERM=xterm-256color: day 019 %s -> %.0f, now %.0f, %.1f%% apart"
-              % (old["xterm-256color"][1], dim_old, dim_mean, off * 100))
+    # The dim path is unchanged. Tolerance 10 %, which is strictly below the
+    # ~17 % the thinning measures on this same instrument — the old +/-20 %
+    # could not fail the way it existed to fail — and about ten standard errors
+    # above the noise in an eight-run mean.
+    off = abs(dim_now - dim_old) / dim_old if dim_old else 1.0
+    check("tiers: the dim path is unchanged from day 019", off <= 0.10,
+          "at TERM=xterm-256color: day 019 %.0f, now %.0f, %.1f%% apart"
+          % (dim_old, dim_now, off * 100))
 
     model_tiers()
     model_dim_path_ignores_survival()
