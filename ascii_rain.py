@@ -49,6 +49,15 @@ CHURN = 0.22
 
 SPEED_MIN, SPEED_MAX = 0.1, 10.0
 
+# The largest grid this program will animate. A terminal window is bounded by
+# pixels; COLUMNS and LINES are not, and ncurses believes them over the
+# terminal's own ioctl. `COLUMNS=9999 LINES=9999` — which scripts and CI export
+# routinely — made initscr() try to allocate a hundred-megacell window and never
+# come back: no first frame, no keypress, no SIGINT, no SIGTERM, SIGKILL only,
+# and a terminal left in raw mode with the cursor hidden. These numbers are
+# larger than an 8K display at a six-pixel font, so no real window reaches them.
+MAX_COLS, MAX_ROWS = 1000, 400
+
 # On a terminal with no `dim` capability the tail cannot step down in
 # brightness, so it steps down in density instead: this is the chance a cell
 # has of still being drawn once it falls past the body tier. Half is enough to
@@ -365,6 +374,56 @@ def has_dim():
         return False
 
 
+def sane_window_env():
+    """Stop COLUMNS and LINES from describing a window that cannot exist.
+
+    ncurses reads both and believes them over the terminal's real size, so a
+    stale or invented value is not a hint, it is the screen. Anything wider or
+    taller than the terminal actually is has to be a lie, and a big enough lie
+    hangs initscr() before the program owns a single exit path.
+
+    Rule: a value that is not a positive whole number, or that is bigger than
+    the window the kernel reports, is dropped and ncurses goes back to asking
+    the terminal. A *smaller* value is kept — drawing into part of a window is
+    a thing people ask for on purpose. With no ioctl answer to check against,
+    MAX_COLS/MAX_ROWS stand in as the ceiling.
+
+    Returns the names it dropped, for the caller to say out loud if it wants.
+    """
+    try:
+        real = os.get_terminal_size(sys.__stdout__.fileno())
+        ceilings = {"COLUMNS": real.columns, "LINES": real.lines}
+    except (OSError, ValueError, AttributeError):
+        ceilings = {}
+    dropped = []
+    for name, cap in (("COLUMNS", MAX_COLS), ("LINES", MAX_ROWS)):
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        ceiling = ceilings.get(name) or cap
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if not 1 <= value <= ceiling:
+            del os.environ[name]
+            dropped.append(name)
+    return dropped
+
+
+def window_size(stdscr):
+    """The grid to animate: what curses reports, clipped to something real.
+
+    `sane_window_env` covers the case that hangs initscr(); this covers the
+    rest of it. Per-frame work is one pass over the columns and their live
+    cells, so it scales with the grid, and a grid that is not a window makes
+    a frame take seconds — long enough that a keypress and a signal both look
+    ignored. Beyond the cap the extra columns are simply not animated.
+    """
+    height, width = stdscr.getmaxyx()
+    return min(height, MAX_ROWS), min(width, MAX_COLS)
+
+
 def build_field(width, height, glyphs, speed, warm_start, previous=None):
     """Grow or shrink the field, keeping the drops that already exist.
 
@@ -409,7 +468,7 @@ def run(stdscr, glyphs, speed, color):
     bold_body = has_color and head_fg != body_fg
     dim = has_dim()
 
-    height, width = stdscr.getmaxyx()
+    height, width = window_size(stdscr)
     field = build_field(width, height, glyphs, speed, warm_start=True)
     frame = 1.0 / FPS
     next_frame = time.monotonic()
@@ -422,7 +481,7 @@ def run(stdscr, glyphs, speed, color):
         key = stdscr.getch()
         if key == curses.KEY_RESIZE:
             curses.update_lines_cols()
-            height, width = stdscr.getmaxyx()
+            height, width = window_size(stdscr)
             stdscr.erase()
             field = build_field(
                 width, height, glyphs, speed, warm_start=True, previous=field
@@ -650,6 +709,8 @@ def _main(argv=None):
             "%s: stdin is not a terminal - no keypress could reach it.\n" % PROG
         )
         return 2
+
+    sane_window_env()
 
     refusal = unanimatable_terminal()
     if refusal is not None:
