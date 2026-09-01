@@ -120,6 +120,38 @@ def build_parser():
     return p
 
 
+# The three flags that take a value. A `--` sitting in one of these slots is
+# that flag's argument to reject, not an end-of-options marker to consume.
+VALUE_FLAGS = ("--speed", "--charset", "--color")
+
+
+def consume_end_of_options(argv, parser):
+    """Strip a bare `--`, and reject anything behind it.
+
+    `--` means "no more options"; this program takes no positional arguments,
+    so the correct reading of `ascii_rain.py --speed 2 --` is "run", and of
+    `ascii_rain.py -- x` is "there is no x here". argparse gets neither right
+    on its own: it hands the bare marker to its (empty) positional list and
+    reports `unrecognized arguments: --`, which names the marker rather than
+    the mistake.
+
+    `--charset --` is left alone deliberately. There the `--` is the value slot
+    of a flag, so it is argparse's "expected one argument" to report, not a
+    marker to eat.
+    """
+    kept = []
+    expecting_value = False
+    for index, arg in enumerate(argv):
+        if arg == "--" and not expecting_value:
+            rest = argv[index + 1:]
+            if rest:
+                parser.error("unexpected argument: %r" % rest[0])
+            return kept
+        kept.append(arg)
+        expecting_value = arg in VALUE_FLAGS
+    return kept
+
+
 def parse_speed(raw, parser):
     try:
         value = float(raw)
@@ -595,7 +627,9 @@ def main(argv=None):
 
 def _main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    args = parser.parse_args(consume_end_of_options(argv, parser))
     speed = parse_speed(args.speed, parser)
     glyphs = parse_charset(args.charset, parser)
     color = parse_color(args.color, parser)
