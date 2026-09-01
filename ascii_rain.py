@@ -190,23 +190,41 @@ def consume_end_of_options(argv, parser):
         if arg == "--" and not expecting_value:
             rest = argv[index + 1:]
             if rest:
-                parser.error("unexpected argument: %r" % rest[0])
+                parser.error("unexpected argument: %s" % show(rest[0]))
             return kept
         kept.append(arg)
         expecting_value = takes_a_value(arg)
     return kept
 
 
+def show(value, limit=48):
+    """A value quoted back for an error message, cut short if it is long.
+
+    `repr` escapes control characters, which is what keeps a crafted argument
+    from repainting the terminal it is being complained about on. It does not
+    bound the length: `--color` with a five-kilobyte word printed five
+    kilobytes of it. Past `limit` characters the rest is an ellipsis and a
+    count.
+    """
+    if len(value) > limit:
+        return "%r... (truncated, %d characters)" % (value[:limit], len(value))
+    return repr(value)
+
+
 def parse_speed(raw, parser):
     try:
         value = float(raw)
     except ValueError:
-        parser.error("--speed wants a number, got %r" % raw)
+        parser.error("--speed wants a number, got %s" % show(raw))
     # NaN fails this comparison, which is the right answer for NaN.
     if not (SPEED_MIN <= value <= SPEED_MAX):
+        # Both the word that was typed and the number float() made of it.
+        # Python reads `2_0` as twenty, so quoting the word alone produced
+        # "must be between 0.1 and 10.0, got '2_0'" — a line arguing against
+        # itself, since 2.0 is inside that range.
         parser.error(
-            "--speed must be between %.1f and %.1f, got %r"
-            % (SPEED_MIN, SPEED_MAX, raw)
+            "--speed must be between %.1f and %.1f, got %s (read as %r)"
+            % (SPEED_MIN, SPEED_MAX, show(raw), value)
         )
     return value
 
@@ -251,18 +269,31 @@ def parse_charset(raw, parser):
                 "--charset custom: needs at least one printable, single-width, "
                 "non-blank character"
             )
+        # Say what was thrown away. `custom:A🌧B` drew A and B and said
+        # nothing at all, which reads as the program ignoring what was asked
+        # for. Same shape and same voice as the encoding message below.
+        lost = sum(1 for c in wanted if not usable_glyph(c))
+        if lost:
+            sys.stderr.write(
+                "%s: %d of %d custom glyphs cannot be drawn in one cell "
+                "(double-width, blank, or an invisible mark); drawing with "
+                "the rest.\n" % (PROG, lost, len(wanted))
+            )
         return glyphs
     if raw not in CHARSETS:
         parser.error(
-            "--charset %r is not one of: %s, custom:<chars>"
-            % (raw, ", ".join(sorted(CHARSETS)))
+            "--charset %s is not one of: %s, custom:<chars>"
+            % (show(raw), ", ".join(sorted(CHARSETS)))
         )
     return CHARSETS[raw]
 
 
 def parse_color(raw, parser):
     if raw not in COLORS:
-        parser.error("--color %r is not one of: %s" % (raw, ", ".join(sorted(COLORS))))
+        parser.error(
+            "--color %s is not one of: %s"
+            % (show(raw), ", ".join(sorted(COLORS)))
+        )
     return raw
 
 
