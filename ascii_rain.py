@@ -229,15 +229,28 @@ def parse_speed(raw, parser):
     return value
 
 
-# The pictograph blocks of plane 1. Unicode's East_Asian_Width table calls a
-# good part of this range Neutral — U+1F327 CLOUD WITH RAIN is `N`, and so is
-# every regional indicator — while terminals draw all of it two cells wide, so
-# the width test alone let `--charset custom:🌧` through and it sheared the
-# grid with no warning. The emoji that live *below* this range (⌚, ⚡, ⭐) are
-# already W in the table and were already rejected. Ambiguous-width characters
-# are deliberately not touched: Cyrillic, Greek, ① and the box-drawing set stay
-# accepted, which is the trade the README's Glyph pools paragraph describes.
-EMOJI_FIRST, EMOJI_LAST = 0x1F000, 0x1FAFF
+# The blocks whose characters terminals draw two cells wide because they are
+# emoji, whatever Unicode's East_Asian_Width table says. U+1F327 CLOUD WITH
+# RAIN is `N` there, and so is every regional indicator, so the width test
+# alone let `--charset custom:🌧` through and it sheared the grid with no
+# warning. The emoji below these blocks (⌚, ⚡, ⭐) are already `W` in the table
+# and were already rejected.
+#
+# Only the emoji blocks, not the whole of plane 1: the first cut of this fence
+# ran 0x1F000-0x1FAFF, which also swallowed U+1F130 (Ambiguous) and U+1F0A1
+# (Neutral) — narrow characters that no terminal draws wide, refused by a rule
+# whose own comment promised not to touch them. Ambiguous width stays
+# untouched, here and everywhere: Cyrillic, Greek, ① and the box-drawing set
+# are accepted, which is the trade the README describes.
+EMOJI_RANGES = (
+    (0x1F1E6, 0x1F1FF),  # regional indicators (flags)
+    (0x1F300, 0x1F5FF),  # miscellaneous symbols and pictographs
+    (0x1F600, 0x1F64F),  # emoticons
+    (0x1F680, 0x1F6FF),  # transport and map symbols
+    (0x1F7E0, 0x1F7EB),  # coloured circles and squares
+    (0x1F900, 0x1F9FF),  # supplemental symbols and pictographs
+    (0x1FA70, 0x1FAFF),  # symbols and pictographs extended-A
+)
 
 
 def usable_glyph(ch):
@@ -255,7 +268,7 @@ def usable_glyph(ch):
     # scattered through the field.
     if unicodedata.category(ch).startswith("M"):
         return False
-    if EMOJI_FIRST <= ord(ch) <= EMOJI_LAST:
+    if any(first <= ord(ch) <= last for first, last in EMOJI_RANGES):
         return False
     return unicodedata.east_asian_width(ch) not in ("W", "F")
 
