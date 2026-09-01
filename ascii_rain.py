@@ -593,6 +593,17 @@ CATCHABLE = ("SIGINT", "SIGQUIT", "SIGHUP", "SIGTERM")
 SHUTDOWN = 0
 
 
+try:
+    # The import machinery holds this lock while it runs, including inside the
+    # weakref callbacks that clean up its per-module locks — code that can run
+    # at any allocation, long after the last `import` statement. It is a
+    # builtin, not a package; every CPython has it, and the guard below is a
+    # no-op on a runtime that does not.
+    from _imp import lock_held as _import_lock_held
+except ImportError:
+    _import_lock_held = None
+
+
 def install_signal_handlers():
     """Turn fatal signals into an exception so the terminal is restored.
 
@@ -605,6 +616,15 @@ def install_signal_handlers():
     used to raise the second exception *inside* the restore the first one had
     started, which left the terminal exactly as broken as no handler at all.
     Later signals return instead, so the restore always finishes.
+
+    Nor does it raise while an import is in flight. A signal landing inside
+    importlib's own machinery — most often the weakref callback that releases a
+    module lock, which runs whenever the garbage collector gets to it — raises
+    where the exception has nowhere to go: CPython prints
+    `Exception ignored in: <function _get_module_lock.<locals>.cb ...>` with a
+    traceback naming this file, then carries on. About one run in a hundred
+    signalled during startup did exactly that. Recording the signum and
+    returning is enough, because the frame loop and `main` both act on it.
     """
 
     def handler(signum, frame):
@@ -615,6 +635,8 @@ def install_signal_handlers():
             # nothing and let the first exception finish its work.
             return
         SHUTDOWN = signum
+        if _import_lock_held is not None and _import_lock_held():
+            return
         raise Interrupted(signum)
 
     for name in CATCHABLE:
