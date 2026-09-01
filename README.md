@@ -5,10 +5,10 @@ Matrix-style rain for your terminal, in one file of pure Python stdlib.
 ![screenshot](screenshot.png)
 
 *The default `matrix` charset in green, twenty seconds into a run on a 100×30
-terminal: 653 lit cells, 45 of them column heads at full brightness. Every glyph,
-position and brightness level in that image is the program's own output —
-`tools/screenshot.py` replays it through a terminal emulator and paints it to a
-PNG, because the hues in real use are your terminal's, not this repo's.*
+terminal. Every glyph, position and brightness level in that image is the
+program's own output — `tools/screenshot.py` replays it through a terminal
+emulator and paints it to a PNG, because the hues in real use are your
+terminal's, not this repo's.*
 
 ## What it does
 
@@ -63,12 +63,25 @@ cannot be caught by anything, so that one is on you. Whatever was still in the
 input buffer is flushed on the way out, so a paste that happens to start with a
 key does not end up running in your shell.
 
+**Exit status.** A keypress exit is `0`, and that is the only thing `0` means. A
+signal is re-raised with its default handler once the terminal is back, so your
+shell and any supervisor see the process killed by that signal rather than
+exiting cleanly: `130` for Ctrl-C, `143` for `SIGTERM`, `129` for `SIGHUP`, and
+`131` for `Ctrl-\`, which keeps its default disposition and will write a core
+file on a system that has them enabled. Bad input is `2`. One window belongs to
+nobody here: a signal that lands in the first few tens of milliseconds, before
+the interpreter reaches `main()`, is CPython's to handle and not this program's —
+the terminal is untouched at that point, but the exit is CPython's, not ours.
+
 **Terminals.** A terminal with no colour renders in your default foreground
 instead of failing, and so does one that cannot hide its cursor — `vt100`,
-`ansi` and `xterm-mono` all run. On terminals with no `dim` attribute the tail
-renders at body brightness, so the trail steps down once instead of twice. On
-`TERM=dumb` the program starts and exits cleanly but cannot animate: there is no
-cursor addressing to animate with.
+`ansi` and `xterm-mono` all run. Those three also have no `dim` attribute, so
+the tail takes its step down from density instead of brightness: about half the
+cells of the trailing section are not drawn, and the trail still steps down
+twice. Each cell decides once whether it survives that far, so the tail
+dissolves rather than flickers. A terminal with no cursor addressing at all —
+`TERM=dumb` — cannot be animated by anything, so the program says so in one line
+and exits `2` without writing to the screen.
 
 **Encoding.** Under a non-UTF-8 locale — `LC_ALL=C`, which is what cron and some
 CI runners hand you — glyphs that cannot be encoded are dropped, with a line on
@@ -79,7 +92,16 @@ drawing a blank screen.
 not double-width, since a double-width glyph shears the column grid and a pool of
 spaces draws nothing at all. Three of the four `blocks` glyphs are
 "ambiguous-width" and will render double on terminals configured to treat them
-that way; the other charsets are single-width throughout.
+that way; the other named charsets are single-width throughout. A `custom:` pool
+accepts ambiguous-width characters too — Cyrillic, Greek, `①`, the box-drawing
+set — and they will shear the field on a CJK-configured terminal for the same
+reason. They are allowed because the filter that would reject `①` rejects
+Cyrillic and Greek with it, which is the worse trade; this paragraph is the
+warning.
+
+**Arguments.** `--` is the end-of-options marker and is consumed like one:
+`python3 ascii_rain.py --speed 2 --` runs. The program takes no positional
+arguments, so anything after `--` is an error naming the offending word.
 
 **Requirements.** Python 3.8 or newer, and a terminal on both stdin and stdout —
 redirect either and it says so and exits `2`, rather than drawing to a file or
@@ -91,10 +113,20 @@ in about 60 ms like every other key.
 will not run without a third-party curses build, and adding one would mean a
 dependency this project does not want.
 
-**Regenerating the screenshot.** `tools/screenshot.py` is a development tool, not
-part of the program. It needs `pyte` and `pillow`, and it reads DejaVu Sans Mono
-and Noto Sans CJK from the paths listed at the top of the file — edit those if
-your fonts live elsewhere.
+**Development tools.** Two scripts under `tools/`, neither of them part of the
+program. `tools/screenshot.py` regenerates `screenshot.png` from a real run and
+wants `pip install pyte pillow`. `tools/checks.py` drives the program under a
+pseudo-terminal and checks the things a person cannot check by looking — exit
+status per signal, the `TERM=dumb` refusal, argument handling, and the
+no-`dim` tail; it wants `pyte` for the last of those and runs the rest without
+it.
+
+The screenshot tool needs a monospace font in regular and bold and a CJK font
+for the half-width katakana. It looks in the usual Linux and macOS locations;
+`python3 tools/screenshot.py --check-fonts` prints what it resolved, and
+`ASCII_RAIN_FONT_MONO`, `ASCII_RAIN_FONT_MONO_BOLD` and `ASCII_RAIN_FONT_CJK`
+override any of the three. If a font is missing it names the one it could not
+find and exits `2`.
 
 ---
 
