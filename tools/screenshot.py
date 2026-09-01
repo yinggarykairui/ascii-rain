@@ -15,8 +15,13 @@ they are the terminal's choice in real life and there is no terminal here.
 
     python3 tools/screenshot.py            # writes ../screenshot.png
 
-Fonts come from the system: DejaVu Sans Mono for latin, Noto Sans CJK for the
-half-width katakana. Adjust the paths below if yours live elsewhere.
+    python3 tools/screenshot.py --check-fonts   # print the fonts it would use
+
+Fonts come from the system: a monospace face in regular and bold for latin, and
+a CJK face for the half-width katakana. Each role has a list of candidate paths
+covering the common Linux and macOS locations, tried in order; set
+ASCII_RAIN_FONT_MONO, ASCII_RAIN_FONT_MONO_BOLD or ASCII_RAIN_FONT_CJK to a
+font file to override any of them.
 """
 
 import fcntl
@@ -52,14 +57,95 @@ PALETTE = {
 }
 FALLBACK = PALETTE[("green", False, False)]
 
-MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-MONO_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
-CJK = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+# Candidate fonts per role, in preference order, as (path, face index). The
+# index matters for .ttc collections: macOS ships Menlo as one file holding
+# regular, bold, italic and bold-italic. Three hardcoded Linux paths used to
+# stand here, and a machine missing any of them got an OSError traceback out of
+# Pillow. The macOS entries are the standard system locations; this repo's
+# sandbox is Linux, so those are the paths, not a claim they were exercised.
+MONO_CANDIDATES = [
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 0),   # Debian/Ubuntu
+    ("/usr/share/fonts/dejavu/DejaVuSansMono.ttf", 0),            # Fedora
+    ("/usr/share/fonts/TTF/DejaVuSansMono.ttf", 0),               # Arch
+    ("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf", 0),
+    ("/System/Library/Fonts/Menlo.ttc", 0),                       # macOS
+    ("/System/Library/Fonts/Supplemental/Courier New.ttf", 0),    # macOS
+]
+MONO_BOLD_CANDIDATES = [
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 0),
+    ("/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf", 0),
+    ("/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf", 0),
+    ("/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf", 0),
+    ("/System/Library/Fonts/Menlo.ttc", 1),                       # macOS, bold face
+    ("/System/Library/Fonts/Supplemental/Courier New Bold.ttf", 0),
+]
+CJK_CANDIDATES = [
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
+    ("/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf", 0),
+    ("/usr/share/fonts/truetype/fonts-japanese-gothic.ttf", 0),
+    ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),      # Fedora/Arch
+    ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),             # macOS
+    ("/System/Library/Fonts/Supplemental/Osaka.ttf", 0),           # macOS
+]
+
+# role -> (candidates, environment override). The role names are what the
+# failure message says out loud, so they are short enough to type.
+ROLES = [
+    ("mono", MONO_CANDIDATES, "ASCII_RAIN_FONT_MONO"),
+    ("mono-bold", MONO_BOLD_CANDIDATES, "ASCII_RAIN_FONT_MONO_BOLD"),
+    ("cjk", CJK_CANDIDATES, "ASCII_RAIN_FONT_CJK"),
+]
 
 # pyte does not model SGR 2 (dim), which curses emits for the tail. Borrow the
 # unused italics flag as a dim marker; ascii_rain never emits real italics.
 pyte.graphics.TEXT = dict(pyte.graphics.TEXT)
 pyte.graphics.TEXT[2] = "+italics"
+
+
+def die(message):
+    """One line on stderr, exit 2. A missing font is a setup problem, not a bug
+    worth a Pillow traceback."""
+    sys.stderr.write("screenshot: %s\n" % message)
+    raise SystemExit(2)
+
+
+def load_font(path, index, size):
+    return ImageFont.truetype(path, size, index=index)
+
+
+def resolve_font(role, candidates, env_var, size=FONT_SIZE):
+    """The first candidate that exists and actually loads, or the override."""
+    override = os.environ.get(env_var)
+    if override:
+        try:
+            load_font(override, 0, size)
+        except (OSError, ValueError) as exc:
+            die("no %s font: %s is set to %r, which will not load (%s)"
+                % (role, env_var, override, exc))
+        return override, 0
+    for path, index in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            load_font(path, index, size)
+        except (OSError, ValueError):
+            continue
+        return path, index
+    die("no %s font found in %d known locations - set %s to a font file"
+        % (role, len(candidates), env_var))
+
+
+def resolve_all():
+    return dict(
+        (role, resolve_font(role, candidates, env_var))
+        for role, candidates, env_var in ROLES
+    )
+
+
+def check_fonts():
+    for role, (path, index) in sorted(resolve_all().items()):
+        print("%-9s %s%s" % (role, path, " [face %d]" % index if index else ""))
+    return 0
 
 
 def capture(seconds):
@@ -97,11 +183,16 @@ def capture(seconds):
 def paint(screen):
     img = Image.new("RGB", (COLS * CELL_W + 2 * PAD, ROWS * CELL_H + 2 * PAD), BG)
     draw = ImageDraw.Draw(img)
+    resolved = resolve_all()
+    mono, mono_bold, cjk = resolved["mono"], resolved["mono-bold"], resolved["cjk"]
     fonts = {
-        (False, "latin"): ImageFont.truetype(MONO, FONT_SIZE),
-        (True, "latin"): ImageFont.truetype(MONO_BOLD, FONT_SIZE),
-        (False, "cjk"): ImageFont.truetype(CJK, FONT_SIZE),
-        (True, "cjk"): ImageFont.truetype(CJK, FONT_SIZE),
+        (False, "latin"): load_font(mono[0], mono[1], FONT_SIZE),
+        (True, "latin"): load_font(mono_bold[0], mono_bold[1], FONT_SIZE),
+        # One CJK face for both weights: the katakana are drawn at head
+        # brightness often enough that a missing bold face would be visible,
+        # and no CJK family here ships a bold that matches the mono metrics.
+        (False, "cjk"): load_font(cjk[0], cjk[1], FONT_SIZE),
+        (True, "cjk"): load_font(cjk[0], cjk[1], FONT_SIZE),
     }
     lit = heads = 0
     for y in range(ROWS):
@@ -122,6 +213,14 @@ def paint(screen):
 
 
 def main():
+    if "--check-fonts" in sys.argv[1:]:
+        return check_fonts()
+    if sys.argv[1:]:
+        die("unexpected argument: %r (the only flag is --check-fonts)"
+            % sys.argv[1])
+    # Resolved before the 20-second capture, so a missing font fails in a
+    # second rather than after the run it would have painted.
+    resolve_all()
     data = capture(SETTLE_SECONDS)
     screen = pyte.Screen(COLS, ROWS)
     pyte.Stream(screen).feed(data.decode("utf-8", "replace"))
@@ -129,7 +228,8 @@ def main():
     img.save(OUTPUT)
     print("wrote %s  %dx%d  cells lit: %d  heads: %d"
           % (OUTPUT, img.size[0], img.size[1], lit, heads))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
