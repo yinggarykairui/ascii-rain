@@ -711,7 +711,21 @@ def unanimatable_terminal():
     like a hang. Refusing is the honest answer, and it is the same shape as the
     `stdout is not a terminal` refusal above it.
     """
-    term = os.environ.get("TERM", "")
+    term = os.environ.get("TERM")
+    # Three states, not two. An unset TERM and an empty one both used to be
+    # reported as `TERM=(unset)`, and both then blamed the terminfo database
+    # ("could not find terminfo database") for what is only a variable nobody
+    # set. Say the true thing in each case before asking terminfo anything.
+    if term is None:
+        return (
+            "TERM is not set, so there is no terminal type to look up - set it "
+            "to your terminal's type, such as xterm or vt100."
+        )
+    if not term:
+        return (
+            "TERM is set but empty, which names no terminal type - set it to "
+            "your terminal's type, such as xterm or vt100."
+        )
     try:
         curses.setupterm()
     except (curses.error, ValueError, OSError, TypeError) as exc:
@@ -721,7 +735,7 @@ def unanimatable_terminal():
         return (
             "TERM=%s is not a terminal type this system knows (%s) - set TERM "
             "to one your terminfo database has, such as xterm or vt100."
-            % (term or "(unset)", exc)
+            % (term, exc)
         )
     try:
         cup = curses.tigetstr("cup")
@@ -731,7 +745,7 @@ def unanimatable_terminal():
         return (
             "TERM=%s has no cursor addressing, so there is nothing to animate "
             "with - set TERM to a full-screen terminal type such as xterm or "
-            "vt100." % (term or "(unset)",)
+            "vt100." % (term,)
         )
     return None
 
