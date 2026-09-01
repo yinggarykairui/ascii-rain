@@ -212,12 +212,24 @@ def paint(screen):
     return img, lit, heads
 
 
+KNOWN_FLAGS = ("-h", "--help", "--check-fonts")
+
+
 def main():
-    if "--check-fonts" in sys.argv[1:]:
+    argv = sys.argv[1:]
+    # Unknown words first. --check-fonts used to be answered before this guard
+    # ran, so `screenshot.py bogus --check-fonts` printed the fonts and exited
+    # 0 with bogus unread; and --help was itself an unexpected argument, which
+    # is a poor answer from a script the README points at.
+    for arg in argv:
+        if arg not in KNOWN_FLAGS:
+            die("unexpected argument: %r (the flags are --check-fonts and "
+                "--help)" % arg)
+    if any(flag in argv for flag in ("-h", "--help")):
+        sys.stdout.write(__doc__.strip() + "\n")
+        return 0
+    if "--check-fonts" in argv:
         return check_fonts()
-    if sys.argv[1:]:
-        die("unexpected argument: %r (the only flag is --check-fonts)"
-            % sys.argv[1])
     # Resolved before the 20-second capture, so a missing font fails in a
     # second rather than after the run it would have painted.
     resolve_all()

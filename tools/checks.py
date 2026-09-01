@@ -495,14 +495,24 @@ GROUPS = [
 ]
 
 
+HELP_FLAGS = ("-h", "--help")
+
+
 def main(argv):
-    names = argv or [name for name, _ in GROUPS]
     known = dict(GROUPS)
-    for name in names:
-        if name not in known:
+    # The README sends people here, and `--help` used to be read as a group
+    # name: "checks: no such group: '--help'", exit 2. Unknown words are still
+    # refused first, so `--help bogus` names bogus rather than exiting 0 over
+    # it - the same order ascii_rain.py uses.
+    for name in argv:
+        if name not in known and name not in HELP_FLAGS:
             sys.stderr.write("checks: no such group: %r (have: %s)\n"
                              % (name, ", ".join(known)))
             return 2
+    if any(flag in argv for flag in HELP_FLAGS):
+        sys.stdout.write(__doc__.strip() + "\n")
+        return 0
+    names = argv or [name for name, _ in GROUPS]
     for name in names:
         print("== %s" % name)
         known[name]()
