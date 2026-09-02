@@ -289,7 +289,13 @@ def paste_run(control, size, term="xterm-256color", settle=1.2, ceiling=10.0):
             except OSError as exc:
                 if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
                     break
-        ready, _, _ = select.select([master], [], [], 0.01)
+        # No waiting on output while there is still paste to deliver: a
+        # terminal writes a paste as fast as the pty will take it, and a
+        # tenth of that rate is not the thing being measured. Polling with a
+        # 0.01 s wait per pass held the writer to ~400 KB/s, which put a 1 MB
+        # paste past the program's own drain ceiling and echoed the tail.
+        ready, _, _ = select.select([master], [], [],
+                                    0.0 if sent < len(payload) else 0.01)
         if ready:
             try:
                 data += os.read(master, 1 << 20)
