@@ -36,7 +36,7 @@ cd ascii-rain
 python3 ascii_rain.py
 ```
 
-Or, once you have the file, anywhere:
+Or with all three flags:
 
 ```
 python3 ascii_rain.py --charset binary --color ice --speed 2
