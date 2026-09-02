@@ -107,10 +107,10 @@ would need a third-party build.
 `pip install pyte pillow` plus three system fonts. `tools/checks.py` drives the
 program under a pseudo-terminal and asserts what looking cannot.
 
-Assets: `screenshot.png` is painted by `tools/screenshot.py` from the program's
-own output; the glyph outlines in it come from DejaVu Sans Mono and DejaVu Sans
-Mono Bold (Bitstream Vera Fonts License) and Noto Sans CJK (SIL Open Font
-License 1.1).
+Licence: MIT, in `LICENSE`. Assets: `screenshot.png` is painted by
+`tools/screenshot.py` from the program's own output; the glyph outlines in it
+come from DejaVu Sans Mono and DejaVu Sans Mono Bold (Bitstream Vera Fonts
+License) and Noto Sans CJK (SIL Open Font License 1.1).
 
 ---
 
