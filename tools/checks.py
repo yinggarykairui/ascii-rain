@@ -836,6 +836,20 @@ def group_args():
               code == 2 and "expected one argument" in err,
               "exit %d: %s" % (code, err.strip()[:70]))
 
+    # A word spelled as an option that this program has no flag for is still
+    # a forgotten value. The British `--colour` and a `--matrix` meant as
+    # `--charset matrix` failed the "is it one of ours" test, were glued on as
+    # values, and the complaint came back about `ice` and about
+    # `--charset '--matrix'` - past the real mistake in the first case, and
+    # naming the wrong kind of mistake in the second.
+    for args in (["--speed", "--colour", "ice"], ["--charset", "--matrix"],
+                 ["--color", "--gren", "x"]):
+        code, _, err = cli(args)
+        check("args: %s is a missing value, not a value that looks like one"
+              % " ".join(args),
+              code == 2 and "expected one argument" in err,
+              "exit %d: %s" % (code, err.strip()[:70]))
+
     code, _, err = cli(["--c", "-x"])
     check("args: --c -x is ambiguous, and quoted as typed",
           code == 2 and "ambiguous option: --c " in err and "--c=" not in err,

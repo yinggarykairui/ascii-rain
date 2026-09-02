@@ -216,25 +216,26 @@ def takes_a_value(arg):
     return any(flag.startswith(arg) for flag in VALUE_FLAGS)
 
 
-# Every flag this program answers to, long spellings first. `takes_a_value`
-# only needs the three that claim a word; deciding whether a *value* is really
-# a flag needs all of them.
-KNOWN_FLAGS = VALUE_FLAGS + ("--help", "--version")
+def reads_as_an_option(arg):
+    """True if `arg` was typed as an option, whether or not this program has one.
 
+    The narrower question — is it one of *this* program's flags — was the
+    wrong one. `--speed --color ice` is a forgotten value and was left alone
+    correctly, but `--speed --colour ice` is the same forgotten value with the
+    British spelling, and `--colour` matches nothing here, so it was glued on
+    as a speed of "--colour" and the complaint came back about `ice`: a word
+    past the real mistake, and the mistake itself never mentioned.
+    `--charset --matrix` did the same and reported `--charset '--matrix' is
+    not one of: ...`. Any word starting with `--` counts, therefore, and
+    argparse names the flag whose value is missing.
 
-def spells_a_flag(arg):
-    """True if argparse would read `arg` as one of this program's own options.
-
-    Abbreviations count, the same way `takes_a_value` counts them, and an
-    ambiguous one (`--c`) counts too: argparse refuses it by name and that
-    refusal is the truthful one.
+    A bare `--` does not count: it is the end-of-options marker, and in a
+    value slot it is the missing value argparse reports. `-h` does, being the
+    one option here spelled with a single dash — everything else beginning
+    with one dash is a value argparse would otherwise refuse to read, which
+    is the whole reason for attaching it.
     """
-    if arg == "-h":
-        return True
-    if not arg.startswith("--") or arg == "--":
-        return False
-    name = arg.split("=", 1)[0]
-    return any(flag.startswith(name) for flag in KNOWN_FLAGS)
+    return arg == "-h" or (arg.startswith("--") and arg != "--")
 
 
 def claims_the_next_word(arg):
@@ -264,15 +265,15 @@ def attach_values(argv):
     `--speed=-inf` is the spelling argparse always reads literally, so that is
     the spelling every value gets. Two words are left alone: a bare `--`,
     which is this program's end-of-options marker and, in a value slot, the
-    missing value argparse reports; and one of this program's own flags, since
-    `--speed --color ice` is a forgotten value rather than a speed of
-    "--color".
+    missing value argparse reports; and anything else a person spelled as an
+    option, since `--speed --color ice` is a forgotten value rather than a
+    speed of "--color" — and so is `--speed --colour ice`.
     """
     kept = []
     expecting = False
     for arg in argv:
         if (expecting and arg.startswith("-") and arg != "--"
-                and not spells_a_flag(arg)):
+                and not reads_as_an_option(arg)):
             kept[-1] = "%s=%s" % (kept[-1], arg)
             expecting = False
             continue
