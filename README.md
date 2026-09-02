@@ -62,16 +62,17 @@ terminal back as they found it; `SIGKILL` cannot be caught by anything. The
 input buffer is flushed on the way out, so a paste does not land in your shell.
 
 **Exit status.** A keypress exit is `0`, and so are `--help` and `--version`;
-`Ctrl-C` and `Ctrl-\` at the keyboard are keypresses, not signals, and a signal
-arriving in the short teardown window after one is ignored, so the tail of a
-paste holding `^C` cannot turn that `0` into a death. Otherwise a signal from
-elsewhere is re-raised with its default handler once the terminal is back, so a
-shell sees the process killed by it: `130`, `143`, `129`, `131` for `SIGINT`,
-`SIGTERM`, `SIGHUP`, `SIGQUIT`. Bad input, and a terminal that cannot be drawn
-on, are `2`. A signal landing before the interpreter has finished starting
-never reaches this program: that status, and the `KeyboardInterrupt` traceback
-CPython prints naming `ascii_rain.py`, are CPython's; send `SIGTERM` or
-`SIGKILL` for certainty at startup.
+`Ctrl-C` and `Ctrl-\` at the keyboard are keypresses, not signals, and once one
+has decided the exit `SIGINT` and `SIGQUIT` stop being honoured, so the tail of
+a paste holding `^C` cannot turn that `0` into a death; `SIGHUP` and `SIGTERM`
+are honoured throughout, including while that tail is read. Otherwise a signal
+from elsewhere is re-raised with its default handler once the terminal is back,
+so a shell sees the process killed by it: `130`, `143`, `129`, `131` for
+`SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT`. Bad input, and a terminal that cannot
+be drawn on, are `2`. A signal landing before the interpreter has finished
+starting never reaches this program: that status, and the `KeyboardInterrupt`
+traceback CPython prints naming `ascii_rain.py`, are CPython's; send `SIGTERM`
+or `SIGKILL` for certainty at startup.
 
 **Terminals.** No colour, or no hideable cursor, loses that and keeps the
 program: `vt100`, `ansi`, `xterm-mono` and the Linux console all run. None of

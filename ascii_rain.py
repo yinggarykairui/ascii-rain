@@ -806,16 +806,19 @@ def run(stdscr, glyphs, speed, color):
             )
             continue
         if key != -1:
-            # The exit is decided here, so the signals this program catches
-            # stop being honoured here: the rest of a paste is still streaming
-            # into a tty whose ISIG comes back on during the restore below,
-            # and a ^C in it used to reach the handler and kill a process that
-            # had already been told to leave by a keypress.
-            stop_catching_signals()
-            # Whatever else was typed or pasted is still in the tty buffer;
-            # without this it lands on the user's shell prompt — and runs.
-            curses.flushinp()
+            # A paste can outrun the drain below, so ^C and ^\ stop being
+            # signals for the rest of this process's life the moment a
+            # keypress decides the exit.
+            stop_catching_keyboard_signals()
+            # Whatever else was typed or pasted is still arriving; without
+            # this it lands on the user's shell prompt — and runs. The drain
+            # goes first, while the tty buffer it is emptying is still full:
+            # flushing first left an empty descriptor that says nothing about
+            # whether a paste is still in flight.
             drain_input()
+            # And what ncurses is holding in its own buffer, which no read of
+            # the descriptor can reach.
+            curses.flushinp()
             return
 
         stdscr.erase()
@@ -845,12 +848,17 @@ def drain_input():
     emulator while this program tears down: 18,851 bytes of a 64 KB paste
     landed on the shell prompt after the alternate screen was left, which is
     the one thing the flush exists to prevent. Reading until the descriptor
-    has been quiet for a moment catches the rest of it; the ceiling means a
-    terminal that never stops talking cannot hold the exit open. The wait is
-    a tenth of a second and it is not skipped on the first pass: polling with
-    no timeout instead read an empty buffer and left, because the terminal
-    that is mid-paste has not been scheduled to refill it yet, and the tail
-    landed on the shell after all.
+    goes quiet catches the rest of it; the ceiling means a terminal that never
+    stops talking cannot hold the exit open.
+
+    How long to wait for the next mouthful is read off the last one. A paste
+    arrives in tty-buffer-sized chunks with the terminal blocked writing more,
+    so a big chunk means wait a tenth of a second for the refill. Anything
+    smaller is not a paste: an ordinary quit has nothing behind it at all and
+    the first pass leaves immediately, and a terminal answering DA or CPR, or
+    reporting the mouse, sends seven bytes every few milliseconds forever —
+    waiting for *that* to go idle held every quit open for the full 1.0 s
+    ceiling, and cost every ordinary quit 100 ms besides.
 
     Called while the tty is still in raw mode, which is half the point: with
     ISIG off a ^C in the middle of the paste is a byte to discard rather than
@@ -858,27 +866,34 @@ def drain_input():
     other half is echo, which is also still off, so the bytes read here are
     never painted onto the shell's screen.
     """
-    idle, ceiling = 0.1, 1.0
+    idle, ceiling, mouthful = 0.1, 1.0, 1024
     try:
         fd = sys.stdin.fileno()
     except (AttributeError, ValueError, OSError):
         return
     deadline = time.monotonic() + ceiling
+    wait = 0.0
     while time.monotonic() < deadline:
         try:
-            ready, _, _ = select.select([fd], [], [], idle)
+            ready, _, _ = select.select([fd], [], [], wait)
         except (OSError, ValueError):
             return
         if not ready:
             return
         try:
-            if not os.read(fd, 65536):
-                return
+            chunk = os.read(fd, 65536)
         except OSError:
             return
+        if not chunk:
+            return
+        wait = idle if len(chunk) >= mouthful else 0.0
 
 
 CATCHABLE = ("SIGINT", "SIGQUIT", "SIGHUP", "SIGTERM")
+
+# The two of those a person can send from the keyboard, which is also the
+# two a paste can manufacture out of its own bytes.
+KEYBOARD = ("SIGINT", "SIGQUIT")
 
 # The signal number that started the shutdown, or 0. Read by the frame loop, so
 # a shutdown still happens even if the exception is swallowed on its way out —
@@ -944,21 +959,27 @@ def install_signal_handlers():
             pass
 
 
-def stop_catching_signals():
-    """Stop honouring the caught signals, once a keypress has decided the exit.
+def stop_catching_keyboard_signals():
+    """Stop honouring ^C and ^\\ as signals once a keypress decides the exit.
 
-    The handler turns a fatal signal into an exception so the terminal is
-    restored, which is right for a signal that means to end the program. It is
-    wrong for the tail of a paste: the program returns on the first pasted
-    byte, the restore turns ISIG back on while the rest is still streaming
-    into the tty, and the line discipline raises SIGINT at a process that is
-    already leaving — a keypress exit that came back as `killed by SIGINT`
-    12 times out of 12, and as SIGQUIT for a paste holding ^\\.
+    The drain below reads the tail of a paste while the tty is still raw, so
+    the line discipline cannot manufacture a SIGINT out of it — but a paste
+    can outrun the drain's ceiling, and then the restore turns ISIG back on
+    with bytes still streaming: a keypress exit that came back as `killed by
+    SIGINT` 12 times out of 12, and as SIGQUIT for a paste holding ^\\.
+    Removing this and leaning on the raw drain alone put one 1 MB ^C paste in
+    six back to `killed by SIGINT`, so it stays.
+
+    Only these two. Ignoring all four also swallowed the SIGHUP of the window
+    being closed — which then never set SHUTDOWN, so the teardown's own
+    `curses.error` was reported as `the terminal went away` and exit 2 for
+    something that is exit 0 — and swallowed a supervisor's SIGTERM for as
+    long as the drain ran. Neither of those can come out of a paste.
 
     Ignoring rather than defaulting, because the default for these is death,
     and the exit status of a keypress is 0 whatever else is in the buffer.
     """
-    for name in CATCHABLE:
+    for name in KEYBOARD:
         sig = getattr(signal, name, None)
         if sig is None:
             continue
