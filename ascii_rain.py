@@ -1003,9 +1003,10 @@ def representable(glyphs, encoding, parser, charset_name, notices):
         )
     if len(keep) < len(glyphs):
         notices.append(
-            "%s: %d of %d %s glyphs are not representable in %s; drawing with "
-            "the rest.\n" % (PROG, len(glyphs) - len(keep), len(glyphs),
-                             charset_name, encoding)
+            "%s: %d of %d %s glyphs are not representable in %s; drawing "
+            "with the rest - try --charset ascii or --charset binary, or a "
+            "UTF-8 locale.\n" % (PROG, len(glyphs) - len(keep), len(glyphs),
+                                 charset_name, encoding)
         )
     return keep
 
