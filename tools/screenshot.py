@@ -153,6 +153,12 @@ def capture(seconds):
     pid, fd = pty.fork()
     if pid == 0:
         os.environ["TERM"] = "xterm-256color"
+        # The pty below is COLS x ROWS, but curses believes COLUMNS and LINES
+        # over the pty when they are set, and this script inherits whatever
+        # the caller's shell exported. A smaller pair painted the rain into a
+        # corner of an image the caption says is 100x30, so drop them.
+        os.environ.pop("COLUMNS", None)
+        os.environ.pop("LINES", None)
         os.execv(sys.executable, [sys.executable, PROGRAM,
                                   "--charset", "matrix", "--color", "green"])
         os._exit(127)
