@@ -99,7 +99,8 @@ Unambiguous abbreviations work (`--sp 2` is `--speed 2`). `--help` and
 
 **Requirements.** Python 3.8 or newer, and a terminal on both stdin and stdout:
 redirect either and it says so and exits `2`. On 3.8 Escape takes ncurses'
-default second to register; on 3.9 and newer, about 60 ms like any other key.
+default second to register; on 3.9 and newer `set_escdelay` cuts that to 25 ms,
+so Escape leaves a step behind every other key rather than level with it.
 `curses` ships with CPython on Linux and macOS but **not** on Windows, which
 would need a third-party build.
 
