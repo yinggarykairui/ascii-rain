@@ -633,6 +633,27 @@ def group_args():
           "1 of 3 custom glyphs" in err,
           err.strip().splitlines()[0][:80] if err.strip() else "(silent)")
 
+    # ...but not next to a fatal one. The advisory used to be written the
+    # moment the pool was read, so a bad --color beside it printed two lines
+    # for one bad input, the first of them about a glyph pool the second one
+    # throws away, and `--help` printed it over the top of the help.
+    for args, wanted in ((["--charset", "custom:A\U0001f327B",
+                           "--color", "nope"], "--color"),
+                         (["--charset", "custom:A\U0001f327B",
+                           "--speed", "99"], "--speed")):
+        code, _, err = cli(args)
+        lines = [line for line in err.splitlines() if line]
+        check("args: %s is one line, about the mistake" % " ".join(args[1:]),
+              code == 2 and len(lines) == 1 and wanted in err
+              and "custom glyphs" not in err,
+              "exit %d, %d line(s): %s" % (code, len(lines), err.strip()[:70]))
+
+    for flag in ("--help", "--version"):
+        code, out, err = cli(["--charset", "custom:A\U0001f327B", flag])
+        check("args: %s prints nothing but %s beside a lossy pool"
+              % (flag, flag), code == 0 and out and err == "",
+              "exit %d, stderr %r" % (code, err.strip()[:60]))
+
     # The emoji fence is the emoji blocks, not the whole of plane 1. U+1F130
     # (Ambiguous) and U+1F0A1 (Neutral) are narrow and stay; the rain cloud is
     # drawn wide by every terminal and goes, whatever the width table says.

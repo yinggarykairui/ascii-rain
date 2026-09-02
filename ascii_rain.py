@@ -373,7 +373,7 @@ def usable_glyph(ch):
     return unicodedata.east_asian_width(ch) not in ("W", "F")
 
 
-def parse_charset(raw, parser):
+def parse_charset(raw, parser, notices):
     if raw.startswith("custom:"):
         wanted = raw[len("custom:") :]
         glyphs = "".join(dict.fromkeys(c for c in wanted if usable_glyph(c)))
@@ -385,9 +385,15 @@ def parse_charset(raw, parser):
         # Say what was thrown away. `custom:A🌧B` drew A and B and said
         # nothing at all, which reads as the program ignoring what was asked
         # for. Same shape and same voice as the encoding message below.
+        #
+        # Held rather than written, because it is an advisory about a pool
+        # that may yet turn out never to be used: `--charset custom:<emoji>ab
+        # --color nope` printed it *and* the --color refusal - two lines for
+        # one bad input, the first about a glyph pool the second throws away.
+        # The caller says it once the arguments are known to be good.
         lost = sum(1 for c in wanted if not usable_glyph(c))
         if lost:
-            complain(
+            notices.append(
                 "%s: %d of %d custom glyphs cannot be drawn in one cell "
                 "(double-width, blank, or an invisible mark); drawing with "
                 "the rest.\n" % (PROG, lost, len(wanted))
@@ -961,7 +967,7 @@ def terminal_encoding():
         return getattr(sys.stdout, "encoding", None) or "ascii"
 
 
-def representable(glyphs, encoding, parser, charset_name):
+def representable(glyphs, encoding, parser, charset_name, notices):
     """Drop glyphs the terminal cannot encode, and say so out loud.
 
     Under a non-UTF-8 locale — `LC_ALL=C`, which is what cron, some CI runners
@@ -983,7 +989,7 @@ def representable(glyphs, encoding, parser, charset_name):
             % (encoding, charset_name)
         )
     if len(keep) < len(glyphs):
-        complain(
+        notices.append(
             "%s: %d of %d %s glyphs are not representable in %s; drawing with "
             "the rest.\n" % (PROG, len(glyphs) - len(keep), len(glyphs),
                              charset_name, encoding)
@@ -1119,16 +1125,24 @@ def _main(argv=None):
     # bad speed unread, while `--bogus --help` exited 2: one sentence in the
     # README, two behaviours in the program. A mistake standing next to --help
     # is a mistake either way it is spelled.
+    # What was dropped from the glyph pool, held until there is nothing left
+    # to refuse: an advisory standing beside a fatal error is a second line
+    # for one bad input, and about a pool that is then never used.
+    notices = []
     speed = parse_speed(scout.speed, parser)
-    glyphs = parse_charset(scout.charset, parser)
+    glyphs = parse_charset(scout.charset, parser, notices)
     color = parse_color(scout.color, parser)
     # Nothing left to refuse, so the real parser can run — which is where
     # --help and --version print and exit 0.
     args = parser.parse_args(argv)
     glyphs = representable(
         glyphs, terminal_encoding(), parser,
-        args.charset if args.charset in CHARSETS else "custom pool",
+        args.charset if args.charset in CHARSETS else "custom pool", notices,
     )
+    # Every argument is good now, and --help and --version have had their
+    # chance to exit 0 over the top of a mistake. Now the advisories.
+    for notice in notices:
+        complain(notice)
 
     if not is_a_terminal(sys.stdout):
         complain(
