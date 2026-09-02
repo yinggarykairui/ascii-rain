@@ -678,6 +678,19 @@ def group_args():
         check("args: %s exits 0" % args[0], code == 0 and out and err == "",
               "exit %d" % code)
 
+    # `--` is the end-of-options marker, not a flag. Every entry of
+    # VALUE_FLAGS begins with those two characters, so the prefix test inside
+    # takes_a_value() answered True for it - no argv was found where that
+    # changed an answer, and it is still the wrong answer to give.
+    rain = load_rain()
+    check("args: -- is not a flag that claims the next word",
+          rain.takes_a_value("--") is False
+          and rain.takes_a_value("--sp") is True
+          and rain.takes_a_value("--speed") is True
+          and rain.takes_a_value("--speed=2") is False
+          and rain.takes_a_value("-x") is False,
+          "takes_a_value('--') is %r" % (rain.takes_a_value("--"),))
+
     # argparse lets a value beginning with `-` through only if it matches its
     # own negative-number pattern - `-5` and `-1.5`, not `-inf`, `-1e3`, `-2.`
     # or `-x`. So a value that was right there came back as "expected one

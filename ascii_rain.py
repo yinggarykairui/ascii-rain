@@ -198,9 +198,15 @@ def takes_a_value(arg):
     prefix (`--c`) counts here too — argparse will refuse it by name, and that
     refusal is the truthful one, so nothing behind it should be consumed first.
 
-    `--speed=2` carries its own value and claims nothing.
+    `--speed=2` carries its own value and claims nothing, and neither does a
+    bare `--`: it is the end-of-options marker, not a flag. Every entry of
+    VALUE_FLAGS begins with those two characters, so the prefix test below
+    answered True for it. No argv was found where that changed an answer -
+    `consume_end_of_options` reaches a bare `--` only when it is *not* in a
+    value slot, and eats it there before asking - but a marker classified as
+    a flag that claims the next word is a trap for the next reader.
     """
-    if not arg.startswith("--") or "=" in arg:
+    if not arg.startswith("--") or arg == "--" or "=" in arg:
         return False
     return any(flag.startswith(arg) for flag in VALUE_FLAGS)
 
@@ -780,8 +786,10 @@ def run(stdscr, glyphs, speed, color):
 
     while True:
         if SHUTDOWN:
-            # A signal fired and something ate the exception on its way out
-            # (curses.wrapper has a bare `except` of its own). Leave anyway.
+            # A signal fired and the handler recorded it without raising —
+            # which is what it does while an import is in flight, and the
+            # whole reason it records the number rather than a flag. Leave
+            # anyway, and let main() turn the number back into a death.
             return
         key = stdscr.getch()
         if key == curses.KEY_RESIZE:
@@ -1099,10 +1107,13 @@ def main(argv=None):
         # a signal at any of those moments used to print a traceback.
         return die_by_signal(SHUTDOWN or signal.SIGINT)
     if SHUTDOWN:
-        # The frame loop's backstop: a signal fired, the exception was eaten on
-        # its way out (curses.wrapper has a bare `except` of its own) and the
-        # loop returned normally instead. The terminal is restored either way,
-        # so the only thing left to get right is the exit status.
+        # The frame loop's backstop: the handler recorded a signal and
+        # returned without raising (an import was in flight), so the loop left
+        # by its own SHUTDOWN check and _main returned a status instead of
+        # unwinding. The terminal is restored either way, so the only thing
+        # left to get right is the exit status. Not curses.wrapper swallowing
+        # an exception, which is what this comment used to say: wrapper is
+        # try/finally, and its one bare `except` wraps start_color().
         return die_by_signal(SHUTDOWN)
     return status
 
