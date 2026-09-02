@@ -787,9 +787,20 @@ def group_args():
 
     # `--` is the end-of-options marker, not a flag. Every entry of
     # VALUE_FLAGS begins with those two characters, so the prefix test inside
-    # takes_a_value() answered True for it - no argv was found where that
-    # changed an answer, and it is still the wrong answer to give.
+    # takes_a_value() answered True for it. That claim of "no argv was found
+    # where it changed an answer" was wrong, and the three below are the
+    # counter-examples: with `--` counted as a flag the first one claimed the
+    # second, neither was consumed, and argparse reported the missing value.
+    # The answers here are the ones after the change.
     rain = load_rain()
+    for args, wanted in ((["--speed", "--", "--", "2"], "'2'"),
+                         (["--sp", "--", "--", "2"], "'2'"),
+                         (["--charset", "--", "--", "ascii"], "'ascii'")):
+        code, _, err = cli(args)
+        check("args: %s names the word behind the marker" % " ".join(args),
+              code == 2 and "unexpected argument" in err and wanted in err,
+              "exit %d: %s" % (code, err.strip()[:70]))
+
     check("args: -- is not a flag that claims the next word",
           rain.takes_a_value("--") is False
           and rain.takes_a_value("--sp") is True

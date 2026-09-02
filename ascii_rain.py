@@ -206,10 +206,15 @@ def takes_a_value(arg):
     `--speed=2` carries its own value and claims nothing, and neither does a
     bare `--`: it is the end-of-options marker, not a flag. Every entry of
     VALUE_FLAGS begins with those two characters, so the prefix test below
-    answered True for it. No argv was found where that changed an answer -
-    `consume_end_of_options` reaches a bare `--` only when it is *not* in a
-    value slot, and eats it there before asking - but a marker classified as
-    a flag that claims the next word is a trap for the next reader.
+    answered True for it. It did change an answer, contrary to what this
+    docstring claimed when the clause was added: `--speed -- -- 2` reported
+    `argument --speed: expected one argument`, because the first `--` was
+    read as a flag claiming the second and so neither was consumed. It now
+    reports `unexpected argument: '2'` - the first `--` is the missing value
+    argparse names, the second is the marker it always was, and `2` is a word
+    standing behind a marker in a program that takes no positional arguments.
+    `--charset -- -- ascii` and `--sp -- -- 2` moved with it. The new answers
+    are the better ones; the old claim that there were none is the error.
     """
     if not arg.startswith("--") or arg == "--" or "=" in arg:
         return False
