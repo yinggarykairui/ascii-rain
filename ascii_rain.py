@@ -24,6 +24,7 @@ import curses
 import locale
 import os
 import random
+import select
 import signal
 import sys
 import time
@@ -673,9 +674,16 @@ def run(stdscr, glyphs, speed, color):
             )
             continue
         if key != -1:
+            # The exit is decided here, so the signals this program catches
+            # stop being honoured here: the rest of a paste is still streaming
+            # into a tty whose ISIG comes back on during the restore below,
+            # and a ^C in it used to reach the handler and kill a process that
+            # had already been told to leave by a keypress.
+            stop_catching_signals()
             # Whatever else was typed or pasted is still in the tty buffer;
             # without this it lands on the user's shell prompt — and runs.
             curses.flushinp()
+            drain_input()
             return
 
         stdscr.erase()
@@ -695,6 +703,47 @@ def run(stdscr, glyphs, speed, color):
             # Fell behind (a resize storm, a suspended process). Re-anchor
             # rather than sprinting to catch up on a backlog of frames.
             next_frame = time.monotonic()
+
+
+def drain_input():
+    """Read what is still arriving, not only what has already arrived.
+
+    `curses.flushinp()` discards what the tty holds at that instant, and a
+    paste bigger than the tty's buffer is still being written by the terminal
+    emulator while this program tears down: 18,851 bytes of a 64 KB paste
+    landed on the shell prompt after the alternate screen was left, which is
+    the one thing the flush exists to prevent. Reading until the descriptor
+    has been quiet for a moment catches the rest of it; the ceiling means a
+    terminal that never stops talking cannot hold the exit open. The wait is
+    a tenth of a second and it is not skipped on the first pass: polling with
+    no timeout instead read an empty buffer and left, because the terminal
+    that is mid-paste has not been scheduled to refill it yet, and the tail
+    landed on the shell after all.
+
+    Called while the tty is still in raw mode, which is half the point: with
+    ISIG off a ^C in the middle of the paste is a byte to discard rather than
+    a signal at a process that has already decided how it is leaving. The
+    other half is echo, which is also still off, so the bytes read here are
+    never painted onto the shell's screen.
+    """
+    idle, ceiling = 0.1, 1.0
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, ValueError, OSError):
+        return
+    deadline = time.monotonic() + ceiling
+    while time.monotonic() < deadline:
+        try:
+            ready, _, _ = select.select([fd], [], [], idle)
+        except (OSError, ValueError):
+            return
+        if not ready:
+            return
+        try:
+            if not os.read(fd, 65536):
+                return
+        except OSError:
+            return
 
 
 CATCHABLE = ("SIGINT", "SIGQUIT", "SIGHUP", "SIGTERM")
@@ -759,6 +808,30 @@ def install_signal_handlers():
             continue
         try:
             signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+
+
+def stop_catching_signals():
+    """Stop honouring the caught signals, once a keypress has decided the exit.
+
+    The handler turns a fatal signal into an exception so the terminal is
+    restored, which is right for a signal that means to end the program. It is
+    wrong for the tail of a paste: the program returns on the first pasted
+    byte, the restore turns ISIG back on while the rest is still streaming
+    into the tty, and the line discipline raises SIGINT at a process that is
+    already leaving — a keypress exit that came back as `killed by SIGINT`
+    12 times out of 12, and as SIGQUIT for a paste holding ^\\.
+
+    Ignoring rather than defaulting, because the default for these is death,
+    and the exit status of a keypress is 0 whatever else is in the buffer.
+    """
+    for name in CATCHABLE:
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, signal.SIG_IGN)
         except (ValueError, OSError):
             pass
 

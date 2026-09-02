@@ -23,6 +23,7 @@ The child always runs with RLIMIT_CORE at 0. SIGQUIT's default action is to
 dump core, and this checker sends SIGQUIT on purpose.
 """
 
+import errno
 import fcntl
 import os
 import pty
@@ -71,7 +72,7 @@ def _child_setup():
 
 
 def spawn(args=(), term="xterm-256color", cols=COLS, rows=ROWS, pipe_stderr=False,
-          env_extra=None, closed=()):
+          env_extra=None, closed=(), controlling=False):
     """Start the program on a pty. Returns (pid, master_fd, stderr_fd or None).
 
     stdin and stdout are the pty, because the program refuses to run without a
@@ -82,6 +83,12 @@ def spawn(args=(), term="xterm-256color", cols=COLS, rows=ROWS, pipe_stderr=Fals
     `closed` names standard fds to close in the child after the dup2s, which
     is what a shell's `>&-` does and what leaves CPython with None where a
     stream object should be.
+
+    `controlling` makes the pty the child's controlling terminal, the way a
+    login shell or `pty.fork()` would. Without it the line discipline has no
+    foreground process group to signal, so a ^C *in the input stream* reaches
+    the child as a byte and never as a SIGINT - which is the whole subject of
+    the paste checks, so they ask for it.
     """
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
@@ -100,6 +107,9 @@ def spawn(args=(), term="xterm-256color", cols=COLS, rows=ROWS, pipe_stderr=Fals
     pid = os.fork()
     if pid == 0:  # child
         try:
+            if controlling:
+                os.setsid()
+                fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
             os.dup2(slave, 0)
             os.dup2(slave, 1)
             os.dup2(err_write if pipe_stderr else slave, 2)
@@ -121,12 +131,18 @@ def spawn(args=(), term="xterm-256color", cols=COLS, rows=ROWS, pipe_stderr=Fals
     return pid, master, err_read
 
 
-def read_for(fd, seconds, stop_when_idle=False):
-    """Drain `fd` for `seconds`, or until it goes quiet if asked."""
+def read_for(fd, seconds, stop_when_idle=False, idle=0.05):
+    """Drain `fd` for `seconds`, or until it goes quiet for `idle` if asked.
+
+    `idle` is worth setting where the program is expected to fall silent
+    mid-exit: it drains the tty for up to a tenth of a second on the way out
+    of a keypress, so a 0.05 s threshold called the run finished and missed
+    the teardown that follows.
+    """
     data = b""
     deadline = time.time() + seconds
     while time.time() < deadline:
-        ready, _, _ = select.select([fd], [], [], 0.05)
+        ready, _, _ = select.select([fd], [], [], idle)
         if not ready:
             if stop_when_idle:
                 break
@@ -165,7 +181,7 @@ def run_until(pid, master, finish, settle=1.2):
     """Let the program draw, then end it with `finish(master, pid)`."""
     data = read_for(master, settle)
     finish(master, pid)
-    data += read_for(master, 2.0, stop_when_idle=True)
+    data += read_for(master, 3.0, stop_when_idle=True, idle=0.3)
     _, status = os.waitpid(pid, 0)
     os.close(master)
     return status, data
@@ -240,6 +256,83 @@ def check_import_lock_handler():
           % (probe.returncode, probe.stdout.decode()[:40], err.strip()[:60]))
 
 
+# One pasted "line" and the control byte a terminal would send at the end of
+# it. 200 bytes is small enough that a 64 KB paste carries 300 of them.
+PASTE_UNIT = b"a" * 200
+PASTE_SIZES = (("64 KB", 65536), ("1 MB", 1024 * 1024))
+
+
+def paste_run(control, size, term="xterm-256color", settle=1.2, ceiling=10.0):
+    """Animate, then shove a paste at the tty faster than it can be read.
+
+    Returns (status, bytes accepted, payload bytes echoed after the restore).
+    The last of those is the README's promise that "the input buffer is
+    flushed on the way out, so a paste does not land in your shell": anything
+    counted there was painted onto the shell's screen once the alternate
+    screen had been left.
+    """
+    rmcup, _ = restore_suffix(term)
+    payload = (PASTE_UNIT + control) * (size // (len(PASTE_UNIT) + len(control)))
+    pid, master, _ = spawn(term=term, controlling=True)
+    data = read_for(master, settle)
+    fcntl.fcntl(master, fcntl.F_SETFL,
+                fcntl.fcntl(master, fcntl.F_GETFL) | os.O_NONBLOCK)
+    view = memoryview(payload)
+    sent = 0
+    status = None
+    started = time.time()
+    while time.time() - started < ceiling:
+        if sent < len(payload):
+            try:
+                sent += os.write(master, view[sent:sent + 65536])
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    break
+        ready, _, _ = select.select([master], [], [], 0.01)
+        if ready:
+            try:
+                data += os.read(master, 1 << 20)
+            except OSError:
+                pass
+        done, waited = os.waitpid(pid, os.WNOHANG)
+        if done == pid:
+            status = waited
+            # Whatever is still arriving would be echoed now, so keep looking.
+            data += read_for(master, 0.4)
+            break
+    if status is None:
+        os.kill(pid, signal.SIGKILL)
+        _, status = os.waitpid(pid, 0)
+        status = None
+    os.close(master)
+    at = data.rfind(rmcup)
+    echoed = data[at + len(rmcup):].count(b"a") if at >= 0 else -1
+    return status, sent, echoed
+
+
+def check_paste_exit():
+    """A keypress exit is 0 no matter how much was pasted behind it.
+
+    The program returns on the first pasted byte, so the rest of the paste is
+    still streaming into the tty while the restore turns ISIG back on. The
+    line discipline then raised SIGINT at a process that had already decided
+    to leave by keypress, and the handler - never uninstalled - routed it into
+    die_by_signal: `killed by SIGINT`, 12 runs out of 12, for a paste that
+    exits 0 the moment its control bytes are taken out.
+    """
+    for name, control in (("^C", b"\x03"), ("^\\", b"\x1c")):
+        for label, size in PASTE_SIZES:
+            status, sent, echoed = paste_run(control, size)
+            check("signals: a %s paste holding %s still exits 0" % (label, name),
+                  status is not None and os.WIFEXITED(status)
+                  and os.WEXITSTATUS(status) == 0,
+                  "%s, %d bytes accepted" % (describe_status(status), sent))
+            check("signals: none of the %s %s paste lands in the shell"
+                  % (label, name), echoed == 0,
+                  "%d byte(s) echoed after the terminal was handed back"
+                  % echoed)
+
+
 def group_signals():
     check_import_lock_handler()
     term = "xterm-256color"
@@ -291,6 +384,8 @@ def group_signals():
           status is not None and os.WIFEXITED(status)
           and os.WEXITSTATUS(status) == 0,
           "%.2f s, %s" % (waited, describe_status(status)))
+
+    check_paste_exit()
 
     pid, master, _ = spawn(term=term, env_extra=absurd)
     read_for(master, 1.0)
@@ -650,7 +745,7 @@ def settled_capture(term, program=PROGRAM, seconds=3.0, cols=COLS, rows=ROWS):
     os.close(slave)
     data = read_for(master, seconds)
     os.write(master, b"q")
-    data += read_for(master, 2.0, stop_when_idle=True)
+    data += read_for(master, 3.0, stop_when_idle=True, idle=0.3)
     os.waitpid(pid, 0)
     os.close(master)
     return data
