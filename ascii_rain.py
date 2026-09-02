@@ -30,7 +30,7 @@ import sys
 import time
 import unicodedata
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 PROG = "ascii-rain"
 USAGE_PROG = "python3 ascii_rain.py"
