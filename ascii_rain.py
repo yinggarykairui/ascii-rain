@@ -148,6 +148,11 @@ def build_parser(scout=False):
         prog=USAGE_PROG,
         description="Matrix-style rain for your terminal. Any key exits.",
         epilog="Example: %s --charset binary --color ice --speed 2" % USAGE_PROG,
+        # The epilog is a command to copy, and a wrapped command is not one:
+        # under the default formatter a 60-column terminal broke the example
+        # across two lines mid-flag. RawDescription keeps description and
+        # epilog verbatim and still wraps each option's help to the width.
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=not scout,
     )
     if scout:
