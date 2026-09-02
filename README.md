@@ -61,15 +61,17 @@ Ctrl-Q, `Ctrl-C` and `Ctrl-\` reach it as ordinary bytes. `SIGINT`, `SIGQUIT`,
 terminal back as they found it; `SIGKILL` cannot be caught by anything. The
 input buffer is flushed on the way out, so a paste does not land in your shell.
 
-**Exit status.** A keypress exit is `0`, the only thing `0` means — `Ctrl-C`
-and `Ctrl-\` at the keyboard are keypresses, not signals. A signal from
+**Exit status.** A keypress exit is `0`, and so are `--help` and `--version`;
+`Ctrl-C` and `Ctrl-\` at the keyboard are keypresses, not signals, and a signal
+arriving in the short teardown window after one is ignored, so the tail of a
+paste holding `^C` cannot turn that `0` into a death. Otherwise a signal from
 elsewhere is re-raised with its default handler once the terminal is back, so a
 shell sees the process killed by it: `130`, `143`, `129`, `131` for `SIGINT`,
-`SIGTERM`, `SIGHUP`, `SIGQUIT`, which still dumps core where that is enabled.
-Bad input, and a terminal that cannot be drawn on, are `2`. A signal landing
-before the interpreter has finished starting never reaches this program, so its
-status is CPython's and nothing here is broken; send `SIGTERM` or `SIGKILL` for
-certainty at startup.
+`SIGTERM`, `SIGHUP`, `SIGQUIT`. Bad input, and a terminal that cannot be drawn
+on, are `2`. A signal landing before the interpreter has finished starting
+never reaches this program: that status, and the `KeyboardInterrupt` traceback
+CPython prints naming `ascii_rain.py`, are CPython's; send `SIGTERM` or
+`SIGKILL` for certainty at startup.
 
 **Terminals.** No colour, or no hideable cursor, loses that and keeps the
 program: `vt100`, `ansi`, `xterm-mono` and the Linux console all run. None of
@@ -91,8 +93,7 @@ if none are left it exits `2`.
 `python3 ascii_rain.py --speed 2 --` runs. There are no positional arguments,
 so a word after `--` is an error naming it, worded as any stray word is.
 Unambiguous abbreviations work (`--sp 2` is `--speed 2`). `--help` and
-`--version` print and exit `0`, but not over the top of a mistake beside them,
-bad flag or bad value alike.
+`--version` do not print over the top of a mistake beside them.
 
 **Requirements.** Python 3.8 or newer, and a terminal on both stdin and stdout:
 redirect either and it says so and exits `2`. On 3.8 Escape takes ncurses'
