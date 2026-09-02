@@ -76,10 +76,12 @@ CPython prints naming `ascii_rain.py`, are CPython's; send `SIGTERM` or
 **Terminals.** No colour, or no hideable cursor, loses that and keeps the
 program: `vt100`, `ansi`, `xterm-mono` and the Linux console all run. None of
 those four can dim in colour, so their tail steps down in density instead —
-about half its cells go undrawn. `TERM=dumb` has no cursor addressing at all
-and cannot be animated: one line, exit `2`, nothing written to the screen. An
-unset, empty or unknown `TERM` gets its own line. `COLUMNS` and `LINES` above
-the real size are ignored.
+about half its cells go undrawn. With `--color mono`, whose three roles are all
+white, that leaves no brightness gradient at all: a bold head over one
+undifferentiated rest. `TERM=dumb` has no cursor addressing and cannot be
+animated: one line, exit `2`, nothing written to the screen. An unset, empty or
+unknown `TERM` gets its own line. `COLUMNS` and `LINES` above the real size are
+ignored.
 
 **Glyph pools.** A `custom:` pool takes printable, non-blank, single-width
 characters, and says how many it dropped when some do not qualify. Emoji go,
