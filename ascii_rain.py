@@ -814,6 +814,11 @@ def unanimatable_terminal():
     `stdout is not a terminal` refusal above it.
     """
     term = os.environ.get("TERM")
+    # TERM goes through show() like every other value this program did not
+    # choose. It is client-supplied over ssh, and a bare %s put it on the
+    # screen as-is: `TERM=$'\e[2J\e[31mPWNED'` repainted the terminal it was
+    # being complained about on, an embedded newline made two lines of one
+    # refusal, and a 4096-character TERM printed 4272 bytes.
     # Three states, not two. An unset TERM and an empty one both used to be
     # reported as `TERM=(unset)`, and both then blamed the terminfo database
     # ("could not find terminfo database") for what is only a variable nobody
@@ -837,7 +842,7 @@ def unanimatable_terminal():
         return (
             "TERM=%s is not a terminal type this system knows (%s) - set TERM "
             "to one your terminfo database has, such as xterm or vt100."
-            % (term, exc)
+            % (show(term), exc)
         )
     try:
         cup = curses.tigetstr("cup")
@@ -847,7 +852,7 @@ def unanimatable_terminal():
         return (
             "TERM=%s has no cursor addressing, so there is nothing to animate "
             "with - set TERM to a full-screen terminal type such as xterm or "
-            "vt100." % (term,)
+            "vt100." % (show(term),)
         )
     return None
 

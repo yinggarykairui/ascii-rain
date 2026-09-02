@@ -338,6 +338,28 @@ def group_dumb():
               and "terminfo database" not in lines[0] and out == b"",
               "exit %s: %s" % (status, message.strip()[:80]))
 
+    # TERM arrives from the client over ssh, so a refusal quotes it the way
+    # every other user-supplied value is quoted. A bare %s let `TERM=$'\e[2J'`
+    # repaint the screen it was being complained about on, an embedded newline
+    # made two lines of one refusal, and a 4096-character TERM printed 4272
+    # bytes.
+    for label, value in (("an escape sequence", "\x1b[2J\x1b[31mPWNED"),
+                         ("a newline", "xterm\nSECOND"),
+                         ("4096 characters", "x" * 4096)):
+        pid, master, err = spawn(term=value, pipe_stderr=True)
+        out = read_for(master, 2.0, stop_when_idle=True)
+        message = os.read(err, 65536).decode("utf-8", "replace")
+        _, status = os.waitpid(pid, 0)
+        os.close(master)
+        os.close(err)
+        lines = [line for line in message.splitlines() if line]
+        check("dumb: a TERM holding %s is quoted, not printed" % label,
+              os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2
+              and len(lines) == 1 and len(message) < 300
+              and "\x1b" not in message and out == b"",
+              "exit %s, %d line(s), %d bytes: %s"
+              % (status, len(lines), len(message), message.strip()[:60]))
+
     pid, master, _ = spawn(term="vt100")
     drawn = read_for(master, 2.0)
     os.write(master, b"q")
