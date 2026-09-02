@@ -9,6 +9,7 @@ terminfo capabilities and byte streams:
     python3 tools/checks.py signals    # exit status per signal
     python3 tools/checks.py dumb       # the TERM=dumb refusal
     python3 tools/checks.py args       # argument handling, including `--`
+    python3 tools/checks.py resize     # the field across a resize
     python3 tools/checks.py tiers      # the no-`dim` tail
     python3 tools/checks.py --help     # this text
 
@@ -890,6 +891,104 @@ def model_tail_never_returns():
           % (len(offences), offences[:3]) if offences
           else "%d cells held back across the run" % len(held_back))
 
+# --------------------------------------------------------------------------
+# group: resize
+
+
+def drawn_cells(field, height, width):
+    """The cells `Drop.draw` would light on this field, as a set.
+
+    Read off the real draw path with the dim branch chosen, so the per-cell
+    coin flip of the thinned tail is not in the number.
+    """
+    lit = set()
+    for x, drop in enumerate(field[:width]):
+        window = Recorder()
+        drop.draw(window, x, height, width, True, True)
+        for y, column, _, _ in window.cells:
+            lit.add((y, column))
+    return lit
+
+
+def settled_field(rain, width, height, seed, frames=240):
+    import random
+
+    random.seed(seed)
+    field = rain.build_field(width, height, rain.CHARSETS["matrix"], 1.0, True)
+    for _ in range(frames):
+        for drop in field:
+            if drop.advance(height):
+                drop.reset(height, 1.0)
+    return field
+
+
+def group_resize():
+    """A shrink keeps the columns falling, instead of emptying the field.
+
+    README: "the columns already falling keep falling, only the new ones are
+    born, and trail lengths rescale with the new height". Rescaling the trail
+    while leaving `head` on its old absolute row made that false in the one
+    direction it is visible: on a 100x30 -> 40x12 shrink a median of 16 of the
+    40 surviving columns had their whole trail below the new last row, drew
+    nothing, and were then recycled from up to 1.5 screens above the top. Lit
+    density measured 0.27 before the shrink and 0.08 after it, for two to
+    three seconds.
+
+    Both numbers here are read off the program's own Drop objects in this
+    process — no terminal, no emulator — and seeded, so they are the same on
+    every machine.
+    """
+    rain = load_rain()
+    undo = stub_color_pairs()
+    (wide, tall), (narrow, short) = (100, 30), (40, 12)
+    ratios = []
+    stranded_total = 0
+    for seed in (20260904, 20260905, 20260906, 20260907, 20260908):
+        field = settled_field(rain, wide, tall, seed)
+        before = len(drawn_cells(field, tall, wide)) / float(wide * tall)
+        field = rain.build_field(narrow, short, rain.CHARSETS["matrix"], 1.0,
+                                 True, previous=field)
+        after = len(drawn_cells(field, short, narrow)) / float(narrow * short)
+        # A column that draws nothing is only honest if it has not arrived
+        # yet: a head still above the top row. One below the bottom is the
+        # bug — the column is falling where no one can see it.
+        stranded = sum(1 for drop in field[:narrow]
+                       if int(drop.head) >= short
+                       and not drawn_cells([drop], short, 1))
+        stranded_total += stranded
+        ratios.append(after / before)
+        note("resize: seed %d: %.3f lit at 100x30, %.3f at 40x12 the instant "
+             "after (%.0f%%), %d column(s) stranded below the new floor"
+             % (seed, before, after, 100 * after / before, stranded))
+    ratios.sort()
+    median = ratios[len(ratios) // 2]
+    check("resize: no column is left falling below the new bottom row",
+          stranded_total == 0, "%d stranded across %d shrinks"
+          % (stranded_total, len(ratios)))
+    check("resize: a shrink keeps at least 70% of the lit density",
+          median >= 0.70, "median %.0f%% of the pre-shrink density (%s)"
+          % (median * 100, ", ".join("%.0f%%" % (r * 100) for r in ratios)))
+
+    # The other direction, and the case that is not a resize at all: a grow
+    # must not strand anything either, and re-fitting to the same height must
+    # leave the field alone rather than re-lighting it.
+    field = settled_field(rain, narrow, short, 20260909)
+    before = drawn_cells(field, short, narrow)
+    field = rain.build_field(narrow, short, rain.CHARSETS["matrix"], 1.0, True,
+                             previous=field)
+    check("resize: a redraw at the same size changes nothing",
+          drawn_cells(field, short, narrow) == before,
+          "%d cells before, %d after"
+          % (len(before), len(drawn_cells(field, short, narrow))))
+
+    grown = rain.build_field(wide, tall, rain.CHARSETS["matrix"], 1.0, True,
+                             previous=field)
+    stranded = sum(1 for drop in grown[:wide]
+                   if int(drop.head) >= tall and not drawn_cells([drop], tall, 1))
+    check("resize: a grow strands nothing either", stranded == 0,
+          "%d stranded" % stranded)
+    undo()
+
 
 # --------------------------------------------------------------------------
 
@@ -897,6 +996,7 @@ GROUPS = [
     ("signals", group_signals),
     ("dumb", group_dumb),
     ("args", group_args),
+    ("resize", group_resize),
     ("tiers", group_tiers),
 ]
 

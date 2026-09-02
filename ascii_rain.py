@@ -362,6 +362,42 @@ class Drop:
     def clip(self, height):
         """Re-derive the trail length from the screen height, both ways."""
         self.length = max(3, min(int(self.fraction * height), max(4, height)))
+        # The height this column was last fitted to. `refit` needs the old one
+        # to know a shrink from a redraw, and by how much.
+        self.height = height
+
+    def refit(self, height):
+        """Fit a surviving column to a new screen: the trail, and the floor.
+
+        `clip` alone rescales the trail and leaves `head` on the absolute row
+        it was already on, so a shrink strands every column whose head is now
+        past the bottom: the whole trail is below the last row, it draws
+        nothing at all, and `advance` then recycles it from up to 1.5 screens
+        *above* the top. On a 100x30 -> 40x12 shrink that was some 16 of the
+        40 surviving columns and the field went from 0.27 lit to 0.08 for two
+        to three seconds — at the one moment the user is certainly looking,
+        and against a README that promises the columns already falling keep
+        falling.
+
+        So the head is rescaled by the ratio the trail length already is, and
+        its trail is re-lit around where it lands: `cells` is keyed by
+        absolute row, so a head that moved without them would light nothing
+        until it had fallen its own length again. Every head moves, not only
+        the stranded ones — a column parked 20 rows above a 30-row screen is
+        4 seconds away from a 12-row one and 1.6 seconds away once it is
+        rescaled too, and leaving those behind traded the empty field for a
+        hole a second later. A column keeps its speed, its trail fraction and
+        its place in the fall; only the rows it lands on change.
+        """
+        was = self.height
+        self.clip(height)
+        if was == height:
+            return
+        self.head = min(self.head * (float(height) / was), height - 1.0)
+        self.cells = {}
+        for row in range(int(self.head) - self.length + 1, int(self.head) + 1):
+            if 0 <= row < height:
+                self.spawn(row)
 
     def advance(self, height):
         previous = int(self.head)
@@ -550,7 +586,7 @@ def build_field(width, height, glyphs, speed, warm_start, previous=None):
     while len(field) < max(1, width):
         field.append(Drop(height, glyphs, speed, warm_start))
     for drop in field:
-        drop.clip(height)
+        drop.refit(height)
     return field
 
 
