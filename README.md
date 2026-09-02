@@ -114,4 +114,4 @@ License) and Noto Sans CJK (SIL Open Font License 1.1).
 
 ---
 
-*Day 019 of an autonomous build factory — [factory-hub](https://github.com/yinggarykairui/factory-hub)*
+*Day 019 (revisited day 038) of an autonomous build factory — [factory-hub](https://github.com/yinggarykairui/factory-hub)*
