@@ -340,6 +340,105 @@ def check_paste_exit():
                   % echoed)
 
 
+def check_hangup_at_exit():
+    """A window closed while the keypress exit is still in flight is still 0.
+
+    Closing a terminal is an ordinary way to end a screensaver, and it can
+    land after the key that was already ending it: the hangup arrives while
+    the program is draining the input the keypress left behind. The suite
+    asserted keypress-to-0, signal-to-death and the paste drain and never
+    once took the pty away mid-teardown, which is how a drain that ignored
+    SIGHUP shipped: with the hangup swallowed, SHUTDOWN stayed 0, the
+    teardown's own `curses.error` took the "the terminal went away" branch
+    and a closed window came back as exit 2 with a message on stderr, 10
+    runs out of 10 at both delays below.
+
+    A hangup that lands *before* the keypress is read is a signal from
+    elsewhere and is meant to kill the process with SIGHUP; only a delay long
+    enough for the key to have been seen is asserted here.
+    """
+    for delay in (0.05, 0.09):
+        pid, master, err = spawn(term="xterm-256color", pipe_stderr=True,
+                                 controlling=True)
+        read_for(master, 1.2)
+        os.write(master, b"q")
+        time.sleep(delay)
+        os.close(master)
+        status, waited = wait_within(pid, 3.0)
+        message = b""
+        while True:
+            chunk = os.read(err, 65536)
+            if not chunk:
+                break
+            message += chunk
+        os.close(err)
+        said = message.decode("utf-8", "replace").strip()
+        check("signals: the terminal closing %.2f s into a keypress exit is 0"
+              % delay,
+              status is not None and os.WIFEXITED(status)
+              and os.WEXITSTATUS(status) == 0 and said == "",
+              "%.2f s, %s%s" % (waited, describe_status(status),
+                                ", stderr %r" % said[:60] if said else ""))
+
+
+def quit_seconds(chatty=False, ceiling=4.0, cadence=0.005):
+    """How long a `q` takes to become an exit, optionally on a chatty tty.
+
+    A terminal answering DA or CPR, or reporting the mouse, writes a handful
+    of bytes every few milliseconds and never goes quiet. A drain that waited
+    for an idle window before returning never got one, and held every quit
+    open to its own ceiling.
+    """
+    pid, master, _ = spawn(term="xterm-256color", controlling=True)
+    read_for(master, 1.2)
+    started = time.time()
+    os.write(master, b"q")
+    next_word = started
+    status = None
+    while time.time() - started < ceiling:
+        now = time.time()
+        if chatty and now >= next_word:
+            try:
+                os.write(master, b"\x1b[?62;c")
+            except OSError:
+                pass
+            next_word = now + cadence
+        ready, _, _ = select.select([master], [], [], cadence)
+        if ready:
+            try:
+                if not os.read(master, 65536):
+                    pass
+            except OSError:
+                pass
+        done, st = os.waitpid(pid, os.WNOHANG)
+        if done == pid:
+            status = st
+            break
+    waited = time.time() - started
+    if status is None:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    os.close(master)
+    return status, waited
+
+
+def check_quit_latency():
+    """A quit costs what a quit costs, with or without a talkative terminal.
+
+    Measured before the drain existed: 0.049 s either way. With a fixed idle
+    window that was never skipped: 0.150 s quiet, and 1.053 s against a
+    terminal answering every 5 ms, which is the ceiling, not a measurement.
+    The bar here is deliberately loose - this is a check for a quit held open
+    by a wait, not a benchmark.
+    """
+    for label, chatty in (("a quiet terminal", False), ("a chatty terminal", True)):
+        status, waited = quit_seconds(chatty=chatty)
+        check("signals: a keypress on %s exits inside 0.4 s" % label,
+              status is not None and os.WIFEXITED(status)
+              and os.WEXITSTATUS(status) == 0 and waited < 0.4,
+              "%.3f s, %s" % (waited, describe_status(status)))
+
+
 def group_signals():
     check_import_lock_handler()
     term = "xterm-256color"
@@ -411,6 +510,8 @@ def group_signals():
               % (len(drawn), waited, describe_status(status)))
 
     check_paste_exit()
+    check_hangup_at_exit()
+    check_quit_latency()
 
     pid, master, _ = spawn(term=term, env_extra=absurd)
     read_for(master, 1.0)
