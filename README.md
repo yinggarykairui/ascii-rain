@@ -76,20 +76,18 @@ CPython prints naming `ascii_rain.py`, are CPython's; send `SIGTERM` or
 **Terminals.** No colour, or no hideable cursor, loses that and keeps the
 program: `vt100`, `ansi`, `xterm-mono` and the Linux console all run. None of
 those four can dim in colour, so their tail steps down in density instead —
-about half its cells go undrawn. With `--color mono`, whose three roles are all
-white, that leaves no brightness gradient at all: a bold head over one
-undifferentiated rest. `TERM=dumb` has no cursor addressing and cannot be
-animated: one line, exit `2`, nothing written to the screen. An unset, empty or
-unknown `TERM` gets its own line. `COLUMNS` and `LINES` above the real size are
-ignored.
+about half its cells go undrawn. In `--color mono` all three roles are white,
+so nothing of the gradient is left: a bold head over one undifferentiated rest.
+`TERM=dumb` has no cursor addressing and cannot be animated: one line, exit
+`2`, nothing on the screen. An unset, empty or unknown `TERM` gets its own
+line. `COLUMNS` and `LINES` above the real size are ignored.
 
 **Glyph pools.** A `custom:` pool takes printable, non-blank, single-width
 characters, and says how many it dropped when some do not qualify. Emoji go,
 and so does a lone variation selector such as U+FE0F. Ambiguous-width
-characters stay — Cyrillic, Greek, `①`, box-drawing, three of the four `blocks`
-glyphs — and render double, shearing the field, on a terminal configured that
-way. Under a non-UTF-8 locale (`LC_ALL=C`) unencodable glyphs go the same way;
-if none are left it exits `2`.
+characters stay — Cyrillic, Greek, three of the four `blocks` glyphs — and
+render double on a terminal configured that way. Under a non-UTF-8 locale
+(`LC_ALL=C`) unencodable glyphs go the same way; if none are left it exits `2`.
 
 **Arguments.** `--` is the end-of-options marker and is consumed like one:
 `python3 ascii_rain.py --speed 2 --` runs. There are no positional arguments,
@@ -105,11 +103,9 @@ so Escape leaves a step behind every other key rather than level with it.
 would need a third-party build.
 
 **Development tools.** Two scripts under `tools/`, neither part of the program;
-`--help` covers both. `tools/screenshot.py` repaints `screenshot.png` from a
-real run and wants `pip install pyte pillow` plus three system fonts.
-`tools/checks.py` drives the program under a pseudo-terminal and asserts what a
-person cannot check by looking: signals, `TERM=dumb`, arguments, the thinned
-tail.
+`--help` covers both. `tools/screenshot.py` repaints `screenshot.png` and wants
+`pip install pyte pillow` plus three system fonts. `tools/checks.py` drives the
+program under a pseudo-terminal and asserts what looking cannot.
 
 Assets: `screenshot.png` is painted by `tools/screenshot.py` from the program's
 own output; the glyph outlines in it come from DejaVu Sans Mono and DejaVu Sans
