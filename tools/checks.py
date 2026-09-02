@@ -71,13 +71,17 @@ def _child_setup():
 
 
 def spawn(args=(), term="xterm-256color", cols=COLS, rows=ROWS, pipe_stderr=False,
-          env_extra=None):
+          env_extra=None, closed=()):
     """Start the program on a pty. Returns (pid, master_fd, stderr_fd or None).
 
     stdin and stdout are the pty, because the program refuses to run without a
     terminal on both. stderr can be a pipe instead, which is the only way to
     tell "wrote nothing to the screen" apart from "wrote a message" when both
     would otherwise land on the same fd.
+
+    `closed` names standard fds to close in the child after the dup2s, which
+    is what a shell's `>&-` does and what leaves CPython with None where a
+    stream object should be.
     """
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
@@ -105,6 +109,8 @@ def spawn(args=(), term="xterm-256color", cols=COLS, rows=ROWS, pipe_stderr=Fals
                         os.close(fd)
                     except OSError:
                         pass
+            for fd in closed:
+                os.close(fd)
             _child_setup()
             os.execve(sys.executable, [sys.executable, PROGRAM] + list(args), env)
         except BaseException:
@@ -384,6 +390,43 @@ def cli(args):
         proc.stderr.decode("utf-8", "replace")
 
 
+def closed_fd_run(args=(), closed=()):
+    """Run with some of fd 0, 1, 2 closed at exec. Returns (status, out, err).
+
+    `>&-` closes a descriptor rather than pointing it somewhere harmless, and
+    CPython then leaves `sys.stdout` (or stdin, or stderr) as None. `out` and
+    `err` come back empty for whichever of those was closed, because there is
+    nothing on the other end to read.
+    """
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            null = os.open(os.devnull, os.O_RDONLY)
+            os.dup2(null, 0)
+            os.dup2(out_w, 1)
+            os.dup2(err_w, 2)
+            for fd in (null, out_r, out_w, err_r, err_w):
+                if fd > 2:
+                    os.close(fd)
+            for fd in closed:
+                os.close(fd)
+            _child_setup()
+            os.execve(sys.executable, [sys.executable, PROGRAM] + list(args),
+                      dict(os.environ))
+        except BaseException:
+            os._exit(127)
+    os.close(out_w)
+    os.close(err_w)
+    out = read_for(out_r, 5.0)
+    err = read_for(err_r, 5.0)
+    os.close(out_r)
+    os.close(err_r)
+    _, status = os.waitpid(pid, 0)
+    return status, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+
 def group_args():
     code, _, err = cli(["--speed", "2", "--"])
     check("args: a bare -- is consumed",
@@ -499,6 +542,51 @@ def group_args():
         code, out, err = cli(args)
         check("args: %s exits 0" % args[0], code == 0 and out and err == "",
               "exit %d" % code)
+
+    # A closed descriptor is not a redirected one: CPython leaves sys.stdout
+    # (or stdin, or stderr) as None, and `.isatty()` and `.write()` on that
+    # were an AttributeError inside the refusal path - a six-line traceback
+    # and exit 1 where the README promises one line and exit 2, or a silent
+    # exit 1 when stderr was the missing one.
+    for label, closed, args, wanted in (
+            ("stdout", (1,), [], "stdout is not a terminal"),
+            ("stdout, with a bad value", (1,), ["--speed", "99"], "--speed"),
+            ("stdin", (0,), [], "stdout is not a terminal")):
+        status, out, err = closed_fd_run(args, closed)
+        lines = [line for line in err.splitlines() if line]
+        check("args: a closed %s is one line and exit 2" % label,
+              os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2
+              and len(lines) == 1 and wanted in err
+              and "Traceback" not in err and out == "",
+              "%s, %d line(s): %s"
+              % (describe_status(status), len(lines), err.strip()[:70]))
+
+    for label, closed, args in (
+            ("stderr", (2,), []),
+            ("stderr, with a bad flag", (2,), ["--bogus"]),
+            ("stdout and stderr", (1, 2), []),
+            ("all three", (0, 1, 2), [])):
+        status, out, err = closed_fd_run(args, closed)
+        check("args: a closed %s exits 2 without a word" % label,
+              os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2
+              and out == "" and err == "",
+              "%s, stdout %r, stderr %r"
+              % (describe_status(status), out[:40], err[:40]))
+
+    # stdin closed with a real terminal still on stdout: the refusal is the
+    # one about stdin, which the pipe cases above cannot reach.
+    pid, master, err_fd = spawn(pipe_stderr=True, closed=(0,))
+    drawn = read_for(master, 2.0, stop_when_idle=True)
+    message = os.read(err_fd, 65536).decode("utf-8", "replace")
+    _, status = os.waitpid(pid, 0)
+    os.close(master)
+    os.close(err_fd)
+    lines = [line for line in message.splitlines() if line]
+    check("args: a closed stdin under a terminal names stdin",
+          os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2
+          and len(lines) == 1 and "stdin is not a terminal" in message
+          and drawn == b"",
+          "%s: %s" % (describe_status(status), message.strip()[:70]))
 
 
 # --------------------------------------------------------------------------

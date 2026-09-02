@@ -90,11 +90,45 @@ class Interrupted(Exception):
     """A fatal signal, re-raised so the terminal restore path still runs."""
 
 
+def complain(text):
+    """One line on stderr, or silence where there is no stderr to write on.
+
+    CPython leaves `sys.stderr` as None when fd 2 was closed at exec — the
+    `2>&-` case, which is not `2>/dev/null`: there is no stream object at all.
+    Every write in this file assumed one, so the refusal path raised an
+    AttributeError of its own and the program exited 1 without a word, from a
+    README that promises one line and exit 2. A refusal nobody can hear is
+    still a refusal, and the exit status is the part the caller reads.
+    """
+    stream = sys.stderr
+    if stream is None:
+        return
+    try:
+        stream.write(text)
+    except (ValueError, OSError):
+        # Closed under us, or a pipe with no reader left. Same answer.
+        pass
+
+
+def is_a_terminal(stream):
+    """True only if this stream exists and is a terminal.
+
+    `sys.stdout` is None when fd 1 was closed at exec, so `.isatty()` was an
+    AttributeError six lines deep instead of the refusal above it. A closed
+    stream is at least as absent as a redirected one, and gets the same
+    answer.
+    """
+    try:
+        return stream is not None and stream.isatty()
+    except (ValueError, OSError):
+        return False
+
+
 class Parser(argparse.ArgumentParser):
     """argparse, but a mistake is one line on stderr instead of a usage dump."""
 
     def error(self, message):
-        sys.stderr.write("%s: %s (try --help)\n" % (PROG, message))
+        complain("%s: %s (try --help)\n" % (PROG, message))
         raise SystemExit(2)
 
 
@@ -287,7 +321,7 @@ def parse_charset(raw, parser):
         # for. Same shape and same voice as the encoding message below.
         lost = sum(1 for c in wanted if not usable_glyph(c))
         if lost:
-            sys.stderr.write(
+            complain(
                 "%s: %d of %d custom glyphs cannot be drawn in one cell "
                 "(double-width, blank, or an invisible mark); drawing with "
                 "the rest.\n" % (PROG, lost, len(wanted))
@@ -763,7 +797,7 @@ def representable(glyphs, encoding, parser, charset_name):
             % (encoding, charset_name)
         )
     if len(keep) < len(glyphs):
-        sys.stderr.write(
+        complain(
             "%s: %d of %d %s glyphs are not representable in %s; drawing with "
             "the rest.\n" % (PROG, len(glyphs) - len(keep), len(glyphs),
                              charset_name, encoding)
@@ -783,7 +817,12 @@ def die_by_signal(signum):
     """
     for stream in (sys.stdout, sys.stderr):
         # Nothing buffered may be lost: the re-raise below does not unwind, so
-        # interpreter shutdown never runs and never flushes these.
+        # interpreter shutdown never runs and never flushes these. A stream
+        # whose fd was closed at exec is None rather than a stream, and this
+        # runs on the way out of a signal, where an AttributeError has nowhere
+        # left to go.
+        if stream is None:
+            continue
         try:
             stream.flush()
         except (ValueError, OSError):
@@ -905,16 +944,16 @@ def _main(argv=None):
         args.charset if args.charset in CHARSETS else "custom pool",
     )
 
-    if not sys.stdout.isatty():
-        sys.stderr.write(
+    if not is_a_terminal(sys.stdout):
+        complain(
             "%s: stdout is not a terminal - there is nothing to draw on. Run "
             "it in a terminal rather than a pipe or a file.\n" % PROG
         )
         return 2
-    if not sys.stdin.isatty():
+    if not is_a_terminal(sys.stdin):
         # With no tty on stdin no keypress can ever arrive, so "any key exits"
         # would be a lie and the only way out would be a signal.
-        sys.stderr.write(
+        complain(
             "%s: stdin is not a terminal - no keypress could reach it. Run it "
             "in a terminal rather than under a redirect.\n" % PROG
         )
@@ -924,7 +963,7 @@ def _main(argv=None):
 
     refusal = unanimatable_terminal()
     if refusal is not None:
-        sys.stderr.write("%s: %s\n" % (PROG, refusal))
+        complain("%s: %s\n" % (PROG, refusal))
         return 2
 
     try:
@@ -938,7 +977,7 @@ def _main(argv=None):
         # story and main() is about to re-raise it: 129 at the shell, and no
         # line, because there is no terminal left to read one on.
         if not SHUTDOWN:
-            sys.stderr.write(
+            complain(
                 "%s: the terminal went away - the window closed, or the "
                 "connection dropped.\n" % PROG
             )
