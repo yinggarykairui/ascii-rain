@@ -26,6 +26,7 @@ dump core, and this checker sends SIGQUIT on purpose.
 import errno
 import fcntl
 import os
+import re
 import pty
 import resource
 import select
@@ -384,6 +385,24 @@ def group_signals():
           status is not None and os.WIFEXITED(status)
           and os.WEXITSTATUS(status) == 0,
           "%.2f s, %s" % (waited, describe_status(status)))
+
+    # A window ncurses cannot open at all. 32768 cells in a dimension made
+    # initscr() print `Error opening terminal: xterm-256color.` and exit 1:
+    # its own message, blaming TERM for a window size, and a status this
+    # program documents nowhere. 6000x6000 opened and then drew nothing for
+    # two seconds and took 3-8 s to answer a keypress. Both are the real
+    # window arriving by ioctl, which the COLUMNS/LINES guard above never saw.
+    for cols, rows in ((65535, 80), (80, 65535), (32768, 32768), (6000, 6000)):
+        pid, master, _ = spawn(term=term, cols=cols, rows=rows)
+        drawn = read_for(master, 1.5)
+        os.write(master, b"q")
+        status, waited = wait_within(pid, 2.0, drain=master)
+        os.close(master)
+        check("signals: a %dx%d window draws, and a keypress ends it" % (cols, rows),
+              len(drawn) > 5120 and status is not None
+              and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0,
+              "%d bytes in 1.5 s, then %.2f s and %s"
+              % (len(drawn), waited, describe_status(status)))
 
     check_paste_exit()
 
@@ -1127,6 +1146,48 @@ def settled_field(rain, width, height, seed, frames=240):
     return field
 
 
+# The cursor-addressing ncurses emits: `ESC [ row ; col H` and `ESC [ row d`.
+# Reading the deepest row and column out of a settled capture is how a screen
+# that is bigger than its window shows up from outside the process.
+CUP = re.compile(rb"\x1b\[(\d*)(?:;(\d*))?H")
+VPA = re.compile(rb"\x1b\[(\d+)d")
+
+
+def deepest_cursor(data):
+    row = col = 0
+    for match in CUP.finditer(data):
+        row = max(row, int(match.group(1) or 1))
+        col = max(col, int(match.group(2) or 1))
+    for match in VPA.finditer(data):
+        row = max(row, int(match.group(1)))
+    return row, col
+
+
+def shrink_live(first, then, settle=1.2):
+    """Run at `first`, resize to `then`, and read the settled frames after it.
+
+    The first second after the resize is thrown away: the program is still
+    drawing the old size while the KEY_RESIZE works its way through, and those
+    bytes name rows the new window does not have for an honest reason.
+
+    The child owns the pty as its controlling terminal, because SIGWINCH goes
+    to a terminal's foreground process group and there is no such group
+    without one - the resize simply never arrives, and every one of these
+    checks passes or fails on a program that was never told.
+    """
+    pid, master, _ = spawn(cols=first[0], rows=first[1], controlling=True)
+    read_for(master, settle)
+    fcntl.ioctl(master, termios.TIOCSWINSZ,
+                struct.pack("HHHH", then[1], then[0], 0, 0))
+    read_for(master, 1.0)
+    data = read_for(master, 1.2)
+    os.write(master, b"q")
+    status, _ = wait_within(pid, 2.0, drain=master)
+    os.close(master)
+    row, col = deepest_cursor(data)
+    return row, col, status
+
+
 def group_resize():
     """A shrink keeps the columns falling, instead of emptying the field.
 
@@ -1193,6 +1254,21 @@ def group_resize():
     check("resize: a grow strands nothing either", stranded == 0,
           "%d stranded" % stranded)
     undo()
+
+    # And a live one, because the field is only half of a resize. A window
+    # bigger than MAX_COLS/MAX_ROWS is clipped before initscr() by writing the
+    # cap into COLUMNS and LINES; ncurses reads those again on every resize,
+    # so leaving them there pinned the screen and a 1200x450 window shrunk to
+    # 100x30 went on addressing row 400 and column 1000 inside it.
+    for first, then in (((1200, 450), (100, 30)), ((2000, 60), (80, 24)),
+                        ((65535, 80), (100, 30)), ((100, 30), (40, 12))):
+        row, col, status = shrink_live(first, then)
+        check("resize: %dx%d shrunk to %dx%d draws inside the new window"
+              % (first + then),
+              row <= then[1] and col <= then[0] and status is not None
+              and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0,
+              "deepest cursor row %d, column %d; %s"
+              % (row, col, describe_status(status)))
 
 
 # --------------------------------------------------------------------------

@@ -560,6 +560,11 @@ def has_dim(has_color):
     return True
 
 
+# The window-size variables this program wrote itself, and only those, so that
+# taking them back out again cannot touch one the user set on purpose.
+PINNED = []
+
+
 def sane_window_env():
     """Stop COLUMNS and LINES from describing a window that cannot exist.
 
@@ -574,6 +579,23 @@ def sane_window_env():
     a thing people ask for on purpose. With no ioctl answer to check against,
     MAX_COLS/MAX_ROWS stand in as the ceiling.
 
+    Then the same ceiling is put on the window itself. A size arriving by
+    ioctl used to bypass this entirely, and `window_size` clips only after
+    initscr() has already allocated: at 6000x6000 that was two seconds before
+    the first byte and three to eight before a keypress was answered, and at
+    32768 cells or more in either dimension ncurses gave up inside initscr()
+    with `Error opening terminal: xterm-256color.` and exit 1 — its own
+    message, blaming TERM for a window size, and a status this program
+    documents nowhere. ncurses believes COLUMNS and LINES over the ioctl, so
+    writing the cap into them is how a window is clipped *before* the
+    allocation rather than after it.
+
+    A variable written here is written for initscr() alone: it is taken back
+    out by `unpin_window_env` the moment the screen exists, because ncurses
+    re-reads both on every resize and a dimension left pinned stops following
+    the window. Measured: a 1200x450 terminal shrunk to 100x30 went on
+    drawing 1000 columns and 400 rows into it.
+
     Returns the names it dropped, for the caller to say out loud if it wants.
     """
     try:
@@ -582,19 +604,42 @@ def sane_window_env():
     except (OSError, ValueError, AttributeError):
         ceilings = {}
     dropped = []
+    del PINNED[:]
     for name, cap in (("COLUMNS", MAX_COLS), ("LINES", MAX_ROWS)):
         raw = os.environ.get(name)
-        if raw is None:
-            continue
         ceiling = ceilings.get(name) or cap
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if not 1 <= value <= ceiling:
-            del os.environ[name]
-            dropped.append(name)
+        value = None
+        if raw is not None:
+            try:
+                value = int(raw)
+            except ValueError:
+                value = 0
+            if not 1 <= value <= ceiling:
+                del os.environ[name]
+                dropped.append(name)
+                value = None
+        if value is None:
+            # Nothing in the environment now, so what ncurses will read is
+            # the window the kernel reports.
+            value = ceilings.get(name)
+        if value is not None and value > cap:
+            os.environ[name] = str(cap)
+            PINNED.append(name)
     return dropped
+
+
+def unpin_window_env():
+    """Give the window back to the terminal, now that the screen is allocated.
+
+    The cap has to be in the environment across initscr(), which is where the
+    memory is claimed and where a window past 32767 cells in a dimension gave
+    up outright. It must not still be there afterwards: ncurses reads COLUMNS
+    and LINES again on every resize, so a value left behind pins the screen
+    to the cap and a window shrunk below it is drawn far outside itself.
+    """
+    for name in PINNED:
+        os.environ.pop(name, None)
+    del PINNED[:]
 
 
 def window_size(stdscr):
@@ -626,6 +671,9 @@ def build_field(width, height, glyphs, speed, warm_start, previous=None):
 
 
 def run(stdscr, glyphs, speed, color):
+    # The screen exists now, so the size caps go back out of the environment
+    # before ncurses can read them again on a resize.
+    unpin_window_env()
     try:
         curses.curs_set(0)
     except curses.error:
