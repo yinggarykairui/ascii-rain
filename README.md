@@ -76,8 +76,8 @@ CPython prints naming `ascii_rain.py`, are CPython's; send `SIGTERM` or
 **Terminals.** No colour, or no hideable cursor, loses that and keeps the
 program: `vt100`, `ansi`, `xterm-mono` and the Linux console all run. None of
 those four can dim in colour, so their tail steps down in density instead —
-about half its cells go undrawn. In `--color mono` all three roles are white,
-so nothing of the gradient is left: a bold head over one undifferentiated rest.
+about half its cells go undrawn. On them `--color mono`, whose roles are all
+white, has no gradient left: a bold head over one undifferentiated rest.
 `TERM=dumb` has no cursor addressing and cannot be animated: one line, exit
 `2`, nothing on the screen. An unset, empty or unknown `TERM` gets its own
 line. `COLUMNS` and `LINES` above the real size are ignored.
