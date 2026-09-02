@@ -657,6 +657,49 @@ def group_args():
         check("args: %s exits 0" % args[0], code == 0 and out and err == "",
               "exit %d" % code)
 
+    # argparse lets a value beginning with `-` through only if it matches its
+    # own negative-number pattern - `-5` and `-1.5`, not `-inf`, `-1e3`, `-2.`
+    # or `-x`. So a value that was right there came back as "expected one
+    # argument", and the two spellings of one mistake disagreed: `--speed -5`
+    # and `--speed=-inf` both named what they refused.
+    for args, wanted in ((["--speed", "-inf"], "-inf"),
+                         (["--speed", "-1e3"], "-1e3"),
+                         (["--speed", "-2."], "-2."),
+                         (["--speed", "-nan"], "-nan"),
+                         (["--sp", "-inf"], "-inf"),
+                         (["--charset", "-x"], "-x"),
+                         (["--cha", "-x"], "-x"),
+                         (["--color", "-x"], "-x")):
+        code, _, err = cli(args)
+        lines = [line for line in err.splitlines() if line]
+        check("args: %s names the value it refused" % " ".join(args),
+              code == 2 and len(lines) == 1 and repr(wanted)[1:-1] in err
+              and "expected one argument" not in err,
+              "exit %d: %s" % (code, err.strip()[:70]))
+
+    # ...and the two spellings of it agree, word for word.
+    for spaced, joined in ((["--speed", "-inf"], ["--speed=-inf"]),
+                           (["--speed", "-5"], ["--speed=-5"]),
+                           (["--charset", "-x"], ["--charset=-x"]),
+                           (["--color", "-x"], ["--color=-x"])):
+        check("args: %s reads like %s" % (" ".join(spaced), joined[0]),
+              cli(spaced) == cli(joined), cli(spaced)[2].strip()[:70])
+
+    # What must not move: a flag standing in a value slot is a forgotten
+    # value, not a value; `--` there is argparse's missing value; and an
+    # ambiguous prefix is refused by name, with the name that was typed.
+    for args in (["--speed", "--color", "ice"], ["--charset", "--version"],
+                 ["--speed", "-h"], ["--charset", "--"], ["--sp", "--", "2"]):
+        code, _, err = cli(args)
+        check("args: %s is still a missing value" % " ".join(args),
+              code == 2 and "expected one argument" in err,
+              "exit %d: %s" % (code, err.strip()[:70]))
+
+    code, _, err = cli(["--c", "-x"])
+    check("args: --c -x is ambiguous, and quoted as typed",
+          code == 2 and "ambiguous option: --c " in err and "--c=" not in err,
+          "exit %d: %s" % (code, err.strip()[:70]))
+
     # A closed descriptor is not a redirected one: CPython leaves sys.stdout
     # (or stdin, or stderr) as None, and `.isatty()` and `.write()` on that
     # were an AttributeError inside the refusal path - a six-line traceback

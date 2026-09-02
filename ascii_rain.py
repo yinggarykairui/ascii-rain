@@ -205,6 +205,71 @@ def takes_a_value(arg):
     return any(flag.startswith(arg) for flag in VALUE_FLAGS)
 
 
+# Every flag this program answers to, long spellings first. `takes_a_value`
+# only needs the three that claim a word; deciding whether a *value* is really
+# a flag needs all of them.
+KNOWN_FLAGS = VALUE_FLAGS + ("--help", "--version")
+
+
+def spells_a_flag(arg):
+    """True if argparse would read `arg` as one of this program's own options.
+
+    Abbreviations count, the same way `takes_a_value` counts them, and an
+    ambiguous one (`--c`) counts too: argparse refuses it by name and that
+    refusal is the truthful one.
+    """
+    if arg == "-h":
+        return True
+    if not arg.startswith("--") or arg == "--":
+        return False
+    name = arg.split("=", 1)[0]
+    return any(flag.startswith(name) for flag in KNOWN_FLAGS)
+
+
+def claims_the_next_word(arg):
+    """True if `arg` is a spelling of exactly one value-taking flag.
+
+    `takes_a_value` counts an ambiguous prefix in as well, because nothing
+    behind one should be eaten as an end-of-options marker. The question here
+    is narrower — whether it is safe to write the next word onto this one —
+    and `--c` is argparse's "ambiguous option" to report: attaching there put
+    `--c=-x`, a spelling nobody typed, into that message.
+    """
+    return (takes_a_value(arg)
+            and sum(1 for flag in VALUE_FLAGS if flag.startswith(arg)) == 1)
+
+
+def attach_values(argv):
+    """Write a flag's value onto the flag when the value looks like an option.
+
+    argparse lets a value beginning with `-` through only if it matches its
+    own negative-number pattern, which is `-5` and `-1.5` and nothing else. So
+    `--speed -inf`, `--speed -1e3`, `--speed -2.` and `--charset -x` all came
+    back as "expected one argument" — a complaint that the value was missing,
+    about a value that was right there — while `--speed -5` and `--speed=-inf`
+    named what they refused. Same mistake, three voices, and the two spellings
+    of one mistake disagreeing.
+
+    `--speed=-inf` is the spelling argparse always reads literally, so that is
+    the spelling every value gets. Two words are left alone: a bare `--`,
+    which is this program's end-of-options marker and, in a value slot, the
+    missing value argparse reports; and one of this program's own flags, since
+    `--speed --color ice` is a forgotten value rather than a speed of
+    "--color".
+    """
+    kept = []
+    expecting = False
+    for arg in argv:
+        if (expecting and arg.startswith("-") and arg != "--"
+                and not spells_a_flag(arg)):
+            kept[-1] = "%s=%s" % (kept[-1], arg)
+            expecting = False
+            continue
+        kept.append(arg)
+        expecting = claims_the_next_word(arg)
+    return kept
+
+
 def consume_end_of_options(argv, parser):
     """Strip a bare `--`, and reject anything behind it.
 
@@ -1040,7 +1105,7 @@ def _main(argv=None):
     parser = build_parser()
     if argv is None:
         argv = sys.argv[1:]
-    argv = consume_end_of_options(argv, parser)
+    argv = attach_values(consume_end_of_options(argv, parser))
     # One wording for one mistake. `ascii_rain.py a` used to reach argparse's
     # plural ("unrecognized arguments: a") while `ascii_rain.py -- a` reached
     # the line above ("unexpected argument: 'a'") — two voices for a word the
